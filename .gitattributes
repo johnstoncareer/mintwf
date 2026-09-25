@@ -1,0 +1,10 @@
+# Normalize text files to LF in the repository
+* text=auto
+
+# Shell scripts must keep LF endings to run on macOS/Linux
+mvnw text eol=lf
+*.sh text eol=lf
+
+# Windows scripts use CRLF
+*.cmd text eol=crlf
+*.bat text eol=crlf
