@@ -2,7 +2,7 @@
 
 A lightweight workflow engine for telecom service and resource orchestration, written entirely by AI.
 
-> **Status:** Early stage. The Java project skeleton is in place, but the engine is not implemented yet. This README describes the project's goals and domain so contributors can get oriented.
+> **Status:** Early stage. REST endpoints for the targeted TM Forum Open APIs are implemented with in-memory storage. The workflow engine itself is not implemented yet.
 
 ## Overview
 
@@ -71,6 +71,41 @@ mintwf targets the following APIs:
 
 TMF701 matters most here because it defines a standard way to represent and query running process flows and their tasks.
 
+### Implementation
+
+The `mintwf-tmf` module implements **v4.0.0** of each API, the one version all nine publish. Each API has one controller, and its paths match the official specs in the [tmforum-apis](https://github.com/tmforum-apis) GitHub organization.
+
+| API | Base path | Resources |
+|---|---|---|
+| TMF622 | `/tmf-api/productOrderingManagement/v4` | `productOrder`, `cancelProductOrder` |
+| TMF641 | `/tmf-api/serviceOrdering/v4` | `serviceOrder`, `cancelServiceOrder` |
+| TMF652 | `/tmf-api/resourceOrderingManagement/v4` | `resourceOrder`, `cancelResourceOrder` |
+| TMF640 | `/tmf-api/ServiceActivationAndConfiguration/v4` | `service`, `monitor` |
+| TMF702 | `/tmf-api/ResourceActivationAndConfiguration/v4` | `resource`, `monitor` |
+| TMF638 | `/tmf-api/serviceInventory/v4` | `service` |
+| TMF639 | `/tmf-api/resourceInventoryManagement/v4` | `resource`, `physicalResource`, `logicalResource` |
+| TMF701 | `/tmf-api/processFlowManagement/v4` | `processFlow`, `processFlow/{id}/taskFlow` |
+| TMF688 | `/tmf-api/event/v4` | `topic`, `topic/{id}/event`, `topic/{id}/hub` |
+
+Every API also has `POST /hub` and `DELETE /hub/{id}` for notification subscriptions.
+
+All controllers follow the TMF630 REST guidelines:
+
+- **Create:** The server assigns `id` and `href`, applies spec defaults (for example `state: acknowledged` and `orderDate` on orders), and returns `400` when a mandatory attribute is missing.
+- **Read:** Lists support `fields`, `offset`, `limit`, and attribute filters such as `state=acknowledged,inProgress` or `serviceOrderItem.state=completed`. Responses include the `X-Total-Count` and `X-Result-Count` headers.
+- **Update:** `PATCH` uses JSON merge patch (`application/merge-patch+json`) and rejects attributes the spec marks as non-patchable.
+- **Errors:** Failures return the TMF `Error` body (`code`, `reason`, `message`, `status`).
+- **Notifications:** Creates, attribute changes, state changes, and deletes are POSTed to `/hub` subscribers. A subscription's `query` can limit delivery by event type, for example `eventType=ServiceOrderStateChangeEvent`.
+
+Current limitations:
+
+- Data is held in memory and is lost on restart.
+- Resources are stored as JSON rather than typed models. Every spec attribute round-trips, but only mandatory attributes are validated.
+- The `/listener/*` paths in the specs are for clients to implement, so they are not provided here.
+- Cancel requests are recorded but do not yet change the referenced order. The engine will handle that.
+- TMF640 and TMF702 requests complete synchronously (`201`), so their `monitor` collections stay empty.
+- The `sort` query parameter is accepted but ignored.
+
 ## Getting Started
 
 mintwf is written in **Java 25** and built with **Maven**.
@@ -89,11 +124,26 @@ mvnw.cmd verify      # Windows cmd / PowerShell
 
 This compiles every module, runs the tests, and writes jars to each module's `target/` directory.
 
+### Run the TMF API server
+
+```sh
+./mvnw -pl mintwf-tmf spring-boot:run
+```
+
+The server listens on `http://localhost:8080`. For example:
+
+```sh
+curl -X POST http://localhost:8080/tmf-api/serviceOrdering/v4/serviceOrder \
+  -H 'Content-Type: application/json' \
+  -d '{"serviceOrderItem":[{"id":"1","action":"add","service":{"name":"Home Fiber"}}]}'
+```
+
 ### Project layout
 
 | Module | Purpose |
 |---|---|
 | `mintwf-core` | Engine core: workflow definitions, execution, and state |
+| `mintwf-tmf` | Spring Boot app with REST controllers for the TM Forum Open APIs |
 
 Java packages live under `com.intwfs.mintwf`.
 
