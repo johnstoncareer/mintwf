@@ -55,20 +55,21 @@ These processes are long-running, involve many external systems, and must surviv
 
 [TM Forum](https://www.tmforum.org/) publishes the [Open APIs](https://www.tmforum.org/oda/open-apis/), a set of standardized REST APIs that telecom systems use to interoperate. mintwf is meant to fit into this ecosystem. Workflows would be triggered by these APIs and call them as steps.
 
-APIs most relevant to orchestration workflows:
+mintwf targets the following APIs:
 
-| API | Name | Role in a workflow |
+| API | Name | Role in mintwf |
 |---|---|---|
-| TMF622 | Product Ordering | Entry point: a customer order that starts a workflow |
+| TMF701 | Process Flow Management | How the engine exposes its running workflows and their tasks |
+| TMF622 | Product Ordering | Incoming orders that start workflows |
 | TMF641 | Service Ordering | Requests creation or modification of services |
 | TMF652 | Resource Ordering | Requests allocation of network resources |
 | TMF640 | Service Activation & Configuration | Activates or configures a service on the network |
-| TMF633 | Service Catalog | Service specifications that drive decomposition |
-| TMF638 | Service Inventory | Records the state of instantiated services |
-| TMF639 | Resource Inventory | Records the state of allocated resources |
-| TMF701 | Process Flow | Standard API for exposing process and task execution |
+| TMF702 | Resource Activation | Activates or configures network resources |
+| TMF638 | Service Inventory | Where finished steps record service state |
+| TMF639 | Resource Inventory | Where finished steps record resource state |
+| TMF688 | Event Management | Lets workflows react to events instead of polling |
 
-TMF701 (Process Flow Management) matters most here because it defines a standard way to represent and query running process flows and their tasks.
+TMF701 matters most here because it defines a standard way to represent and query running process flows and their tasks.
 
 ## Getting Started
 
