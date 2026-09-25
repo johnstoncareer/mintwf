@@ -2,7 +2,7 @@
 
 A lightweight workflow engine for telecom service and resource orchestration, written entirely by AI.
 
-> **Status:** Early stage. The repository has no source code yet. This README describes the project's goals and domain so contributors can get oriented before implementation begins.
+> **Status:** Early stage. The Java project skeleton is in place, but the engine is not implemented yet. This README describes the project's goals and domain so contributors can get oriented.
 
 ## Overview
 
@@ -73,7 +73,29 @@ TMF701 matters most here because it defines a standard way to represent and quer
 
 ## Getting Started
 
-_Coming soon: build, run, and usage instructions will be added once source code is available._
+mintwf is written in **Java 25** and built with **Maven**.
+
+### Prerequisites
+
+- JDK 25 or newer, with `JAVA_HOME` set
+- No Maven install is needed. The bundled Maven wrapper (`mvnw`) downloads the right version automatically.
+
+### Build and test
+
+```sh
+./mvnw verify        # macOS / Linux / Git Bash
+mvnw.cmd verify      # Windows cmd / PowerShell
+```
+
+This compiles every module, runs the tests, and writes jars to each module's `target/` directory.
+
+### Project layout
+
+| Module | Purpose |
+|---|---|
+| `mintwf-core` | Engine core: workflow definitions, execution, and state |
+
+Java packages live under `com.intwfs.mintwf`.
 
 ## Contributing
 
