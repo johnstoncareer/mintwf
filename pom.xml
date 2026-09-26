@@ -45,6 +45,13 @@
             </dependency>
             <dependency>
                 <groupId>com.intwfs.mintwf</groupId>
+                <artifactId>mintwf-core</artifactId>
+                <version>${project.version}</version>
+                <type>test-jar</type>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.intwfs.mintwf</groupId>
                 <artifactId>mintwf-store-jdbc</artifactId>
                 <version>${project.version}</version>
             </dependency>
@@ -88,6 +95,11 @@
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-compiler-plugin</artifactId>
                     <version>3.14.0</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-jar-plugin</artifactId>
+                    <version>3.4.2</version>
                 </plugin>
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>

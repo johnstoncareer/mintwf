@@ -199,7 +199,11 @@ public final class BpmnParser {
                 }
             }
         }
-        return new ServiceTask(id, name, handlerType.strip(), fields, defaultFlow);
+        String async = element.getAttributeNS(MINTWF_NS, "async").strip();
+        if (!async.isEmpty() && !async.equals("true") && !async.equals("false")) {
+            throw new BpmnParseException(describe(element) + ": mintwf:async must be true or false");
+        }
+        return new ServiceTask(id, name, handlerType.strip(), fields, !async.equals("false"), defaultFlow);
     }
 
     private static SequenceFlow sequenceFlow(Element element) {

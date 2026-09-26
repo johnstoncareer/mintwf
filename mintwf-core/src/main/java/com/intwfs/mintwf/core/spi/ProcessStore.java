@@ -1,11 +1,13 @@
 package com.intwfs.mintwf.core.spi;
 
 import com.intwfs.mintwf.core.api.InstanceQuery;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
 /**
- * Persists deployments and instance state. Implementations must be thread-safe.
+ * Persists deployments, instance state, and jobs. Implementations must be thread-safe, and safe to share between
+ * processes when they claim to be (the CLI and the worker use one database).
  */
 public interface ProcessStore {
 
@@ -19,16 +21,13 @@ public interface ProcessStore {
     Optional<DeploymentRecord> deployment(String processKey, int version);
 
     /**
-     * @throws OptimisticLockException if an instance with this id already exists
-     */
-    void insertInstance(InstanceState instance);
-
-    /**
-     * Replaces an instance's state, but only if its stored revision is still {@code expectedRevision}.
+     * Applies a change atomically: the instance insert or update, and the job inserts and deletes, all happen or none
+     * do.
      *
-     * @throws OptimisticLockException if the stored revision differs or the instance does not exist
+     * @throws OptimisticLockException if an inserted instance already exists, or an updated one is missing or no
+     *     longer at {@link InstanceChange#expectedRevision()}
      */
-    void updateInstance(InstanceState instance, long expectedRevision);
+    void save(InstanceChange change);
 
     Optional<InstanceState> instance(String id);
 
@@ -36,4 +35,30 @@ public interface ProcessStore {
      * Returns the matching instances, oldest first.
      */
     List<InstanceState> instances(InstanceQuery query);
+
+    Optional<Job> job(String id);
+
+    /**
+     * Returns an instance's jobs, pending and incidents, oldest first.
+     */
+    List<Job> jobs(String instanceId);
+
+    /**
+     * Claims up to {@code limit} pending jobs that are due at {@code now} and not claimed by a live lock, earliest due
+     * first. Each claimed job is returned with {@code lockOwner} and {@code lockExpiry} set.
+     */
+    List<Job> acquireJobs(String owner, Instant now, Instant lockExpiry, int limit);
+
+    /**
+     * Replaces a job, but only if it still exists and its stored lock owner is {@code expectedLockOwner}, which may be
+     * {@code null}.
+     *
+     * @return whether the job was updated
+     */
+    boolean updateJob(Job job, String expectedLockOwner);
+
+    /**
+     * Deletes a job if it exists.
+     */
+    void deleteJob(String id);
 }

@@ -4,6 +4,7 @@ import com.intwfs.mintwf.core.MintwfException;
 import com.intwfs.mintwf.core.api.InstanceStatus;
 import com.intwfs.mintwf.core.api.NotFoundException;
 import com.intwfs.mintwf.core.api.ProcessExecutionException;
+import com.intwfs.mintwf.core.job.RetryPolicy;
 import com.intwfs.mintwf.core.model.EndEvent;
 import com.intwfs.mintwf.core.model.ExclusiveGateway;
 import com.intwfs.mintwf.core.model.FlowNode;
@@ -18,7 +19,7 @@ import com.intwfs.mintwf.core.spi.CompiledExpression;
 import com.intwfs.mintwf.core.spi.Execution;
 import com.intwfs.mintwf.core.spi.ExpressionException;
 import com.intwfs.mintwf.core.spi.InstanceState;
-import com.intwfs.mintwf.core.spi.TaskContext;
+import com.intwfs.mintwf.core.spi.Job;
 import com.intwfs.mintwf.core.spi.TaskHandler;
 import java.time.Clock;
 import java.util.ArrayDeque;
@@ -28,12 +29,13 @@ import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * Moves tokens through a process until every token is at a wait state or has ended.
  *
- * <p>Each method takes an instance state and returns the next one without touching the store, so a failed command
- * leaves nothing behind. The caller saves the result.
+ * <p>Each method takes an instance state and returns the next one, plus any jobs to create, without touching the
+ * store. A failed command leaves nothing behind. The caller saves the result.
  */
 public final class Interpreter {
 
@@ -42,24 +44,36 @@ public final class Interpreter {
 
     private final Map<String, TaskHandler> handlers;
     private final Clock clock;
+    private final RetryPolicy retryPolicy;
 
-    public Interpreter(Map<String, TaskHandler> handlers, Clock clock) {
+    public Interpreter(Map<String, TaskHandler> handlers, Clock clock, RetryPolicy retryPolicy) {
         this.handlers = Map.copyOf(handlers);
         this.clock = clock;
+        this.retryPolicy = retryPolicy;
+    }
+
+    /**
+     * The outcome of a command: the instance's next state and the jobs it created.
+     */
+    public record Result(InstanceState state, List<Job> createdJobs) {
+
+        public Result {
+            createdJobs = List.copyOf(createdJobs);
+        }
     }
 
     /**
      * Creates an instance and runs it from its start event.
      */
-    public InstanceState start(ExecutableProcess process, String id, String businessKey,
-                               Map<String, ?> variables) {
+    public Result start(ExecutableProcess process, String id, String businessKey, Map<String, ?> variables) {
         Run run = new Run(process, new InstanceState(id, process.key(), process.version(), businessKey,
                 InstanceStatus.ACTIVE, Variables.copyOf(variables), List.of(), 1, clock.instant(), null, 0));
         StartEvent start = (StartEvent) process.definition().nodes().stream()
                 .filter(StartEvent.class::isInstance).findFirst().orElseThrow();
         Execution token = new Execution(run.newExecutionId(), start.id(), null);
         run.executions.put(token.id(), token);
-        run.advance(token);
+        run.queue.add(token);
+        run.drain();
         return run.finish();
     }
 
@@ -68,8 +82,8 @@ public final class Interpreter {
      *
      * @throws NotFoundException if the instance has no open task with this id
      */
-    public InstanceState completeTask(ExecutableProcess process, InstanceState state, String taskId,
-                                      Map<String, ?> variables) {
+    public Result completeTask(ExecutableProcess process, InstanceState state, String taskId,
+                               Map<String, ?> variables) {
         requireActive(state);
         Run run = new Run(process, state);
         Execution task = run.executions.get(taskId);
@@ -84,7 +98,47 @@ public final class Interpreter {
     }
 
     /**
-     * Ends an active instance and removes its tokens.
+     * Returns whether {@code job}'s token is still waiting on its service task in an active instance. A job that is
+     * not has been overtaken, for example by a concurrent worker, and can be dropped.
+     */
+    public boolean isWaiting(InstanceState state, Job job) {
+        return state.status() == InstanceStatus.ACTIVE && state.executions().stream()
+                .anyMatch(e -> e.id().equals(job.executionId()) && e.nodeId().equals(job.nodeId()));
+    }
+
+    /**
+     * Runs the handler of a service task job against a copy of the instance variables, without changing the instance.
+     *
+     * @return the variables the handler set
+     * @throws ProcessExecutionException if the handler is missing or fails
+     */
+    public Map<String, Object> runHandler(ExecutableProcess process, InstanceState state, Job job) {
+        ServiceTask task = (ServiceTask) process.definition().node(job.nodeId());
+        HandlerContext context = new HandlerContext(state, task, new LinkedHashMap<>(state.variables()));
+        invoke(task, context);
+        return context.changes();
+    }
+
+    /**
+     * Moves a service task job's token on after its handler succeeded, applying the variables the handler set.
+     *
+     * @throws ProcessExecutionException if the token is no longer waiting, or the instance fails while running on
+     */
+    public Result completeServiceTask(ExecutableProcess process, InstanceState state, Job job,
+                                      Map<String, Object> changes) {
+        if (!isWaiting(state, job)) {
+            throw new ProcessExecutionException("instance '" + state.id() + "' is no longer waiting on job '"
+                    + job.id() + "'");
+        }
+        Run run = new Run(process, state);
+        run.variables.putAll(changes);
+        run.leave(run.executions.get(job.executionId()), process.definition().node(job.nodeId()));
+        run.drain();
+        return run.finish();
+    }
+
+    /**
+     * Ends an active instance and removes its tokens. The caller deletes the instance's jobs.
      */
     public InstanceState cancel(InstanceState state) {
         requireActive(state);
@@ -100,6 +154,21 @@ public final class Interpreter {
         }
     }
 
+    private void invoke(ServiceTask task, HandlerContext context) {
+        TaskHandler handler = handlers.get(task.type());
+        if (handler == null) {
+            throw new ProcessExecutionException(
+                    describe(task) + ": no task handler is registered for type '" + task.type() + "'");
+        }
+        try {
+            handler.execute(context);
+        } catch (MintwfException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ProcessExecutionException(describe(task) + " failed: " + e.getMessage(), e);
+        }
+    }
+
     /** The working copy of one instance during one command. */
     private final class Run {
 
@@ -109,6 +178,7 @@ public final class Interpreter {
         private final Map<String, Object> variables;
         private final Map<String, Execution> executions = new LinkedHashMap<>();
         private final Deque<Execution> queue = new ArrayDeque<>();
+        private final List<Job> createdJobs = new ArrayList<>();
         private int nextExecutionId;
         private int steps;
 
@@ -127,11 +197,6 @@ public final class Interpreter {
             return String.valueOf(nextExecutionId++);
         }
 
-        void advance(Execution token) {
-            queue.add(token);
-            drain();
-        }
-
         void drain() {
             while (!queue.isEmpty()) {
                 if (++steps > MAX_STEPS) {
@@ -143,8 +208,9 @@ public final class Interpreter {
                 switch (node) {
                     case StartEvent _ -> leave(token, node);
                     case EndEvent _ -> executions.remove(token.id());
+                    case ServiceTask task when task.async() -> createdJobs.add(newJob(token, task));
                     case ServiceTask task -> {
-                        invoke(task);
+                        invoke(task, new HandlerContext(original, task, variables));
                         leave(token, node);
                     }
                     case UserTask _, ReceiveTask _ -> {
@@ -154,6 +220,12 @@ public final class Interpreter {
                     case ParallelGateway gateway -> join(token, gateway);
                 }
             }
+        }
+
+        private Job newJob(Execution token, ServiceTask task) {
+            return new Job(UUID.randomUUID().toString(), original.id(), token.id(), task.id(),
+                    Job.Type.SERVICE_TASK, clock.instant(), retryPolicy.attempts(), null, null, null, null,
+                    clock.instant());
         }
 
         /** Leaves a non-gateway node by every flow whose condition holds, or by the default flow if none does. */
@@ -248,83 +320,13 @@ public final class Interpreter {
             return holds;
         }
 
-        private void invoke(ServiceTask task) {
-            TaskHandler handler = handlers.get(task.type());
-            if (handler == null) {
-                throw new ProcessExecutionException(
-                        describe(task) + ": no task handler is registered for type '" + task.type() + "'");
-            }
-            try {
-                handler.execute(new Context(task));
-            } catch (MintwfException e) {
-                throw e;
-            } catch (Exception e) {
-                throw new ProcessExecutionException(describe(task) + " failed: " + e.getMessage(), e);
-            }
-        }
-
-        InstanceState finish() {
+        Result finish() {
             boolean completed = executions.isEmpty();
-            return new InstanceState(original.id(), original.processKey(), original.processVersion(),
+            InstanceState next = new InstanceState(original.id(), original.processKey(), original.processVersion(),
                     original.businessKey(), completed ? InstanceStatus.COMPLETED : InstanceStatus.ACTIVE, variables,
                     List.copyOf(executions.values()), nextExecutionId, original.startedAt(),
                     completed ? clock.instant() : null, original.revision() + 1);
-        }
-
-        /** The view of this run a task handler gets. */
-        private final class Context implements TaskContext {
-
-            private final ServiceTask task;
-
-            Context(ServiceTask task) {
-                this.task = task;
-            }
-
-            @Override
-            public String processKey() {
-                return original.processKey();
-            }
-
-            @Override
-            public String instanceId() {
-                return original.id();
-            }
-
-            @Override
-            public String businessKey() {
-                return original.businessKey();
-            }
-
-            @Override
-            public String activityId() {
-                return task.id();
-            }
-
-            @Override
-            public String activityName() {
-                return task.name();
-            }
-
-            @Override
-            public Map<String, String> fields() {
-                return task.fields();
-            }
-
-            @Override
-            public Map<String, Object> variables() {
-                return Collections.unmodifiableMap(variables);
-            }
-
-            @Override
-            public Object variable(String name) {
-                return variables.get(name);
-            }
-
-            @Override
-            public void setVariable(String name, Object value) {
-                Variables.requireName(name);
-                variables.put(name, Variables.copyValue(name, value));
-            }
+            return new Result(next, createdJobs);
         }
     }
 

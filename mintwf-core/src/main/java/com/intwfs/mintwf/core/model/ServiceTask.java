@@ -7,8 +7,11 @@ import java.util.Map;
  *
  * @param type the handler type, from the {@code mintwf:type} attribute
  * @param fields handler configuration, from {@code mintwf:field} extension elements
+ * @param async whether the handler runs as a job ({@code true}, the default) or inside the command that reaches the
+ *     task ({@code mintwf:async="false"})
  */
-public record ServiceTask(String id, String name, String type, Map<String, String> fields, String defaultFlow)
+public record ServiceTask(String id, String name, String type, Map<String, String> fields, boolean async,
+                          String defaultFlow)
         implements FlowNode {
 
     public ServiceTask {

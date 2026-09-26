@@ -2,7 +2,7 @@
 
 A lightweight workflow engine for telecom service and resource orchestration, written entirely by AI.
 
-> **Status:** Early stage. The in-memory engine core runs the BPMN subset below. Persistence, the CLI, and the skills are not implemented yet.
+> **Status:** Early stage. The engine runs the BPMN subset below, stores state in H2, and runs service tasks as retried jobs in a background worker. The process command CLI and the skills are not implemented yet.
 
 ## Overview
 
@@ -57,7 +57,7 @@ A document must contain exactly one `process` with `isExecutable="true"`. Other 
 |---|---|
 | `startEvent` | Exactly one, without an event definition. |
 | `endEvent` | Without an event definition. The instance completes when every token has reached an end event. |
-| `serviceTask` | Runs the task handler named by `mintwf:type`. Handler settings go in `<mintwf:field name="..." value="..."/>` inside `extensionElements`. |
+| `serviceTask` | Runs the task handler named by `mintwf:type` as a background job, with retries. `mintwf:async="false"` runs it immediately instead, without retries. Handler settings go in `<mintwf:field name="..." value="..."/>` inside `extensionElements`. See [Service tasks](#service-tasks). |
 | `userTask`, `receiveTask` | Waits until the task is completed with `complete-task`. |
 | `exclusiveGateway` | Takes the first outgoing flow, in document order, whose condition is true, or else the `default` flow. |
 | `parallelGateway` | Waits for a token on every incoming flow, then continues on every outgoing flow. |
@@ -66,6 +66,38 @@ A document must contain exactly one `process` with `isExecutable="true"`. Other 
 `documentation`, `extensionElements`, `laneSet`, `textAnnotation`, `association`, and diagram information are allowed and ignored.
 
 Conditions use a small expression language: variable paths such as `order.site.region`, number, string, `true`, `false` and `null` literals, `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`, and parentheses. A condition may be wrapped in `${...}`. Variables hold JSON values only: strings, numbers, booleans, null, lists, and maps.
+
+### Service tasks
+
+A service task runs as a job: the instance waits on the task while the `mintwf worker` process calls the handler. If the handler fails, the job is tried again after 10 seconds, then after 20 more. When all 3 attempts have failed, the job becomes an **incident**: the instance stays on that task, and `get-instance` shows the error. Fix the cause, then use `retry-incident` to give the job 3 more attempts.
+
+A handler can run more than once for the same task, for example if the worker stops just after a call succeeded, so the systems it calls should tolerate repeats.
+
+mintwf includes one handler, `http`:
+
+```xml
+<serviceTask id="allocatePort" name="Allocate port" mintwf:type="http">
+  <extensionElements>
+    <mintwf:field name="url" value="https://inventory.example.com/sites/${siteId}/ports"/>
+    <mintwf:field name="inputVariables" value="bandwidth,customerId"/>
+    <mintwf:field name="resultVariable" value="port"/>
+    <mintwf:field name="header.Authorization" value="Bearer ..."/>
+  </extensionElements>
+</serviceTask>
+```
+
+| Field | Meaning |
+|---|---|
+| `url` | Required. `${name}` is replaced by the value of variable `name`, URL-encoded. |
+| `method` | `GET`, `POST` (the default), `PUT`, `PATCH`, or `DELETE`. |
+| `inputVariables` | Comma-separated variables to send as a JSON object. Without it, `POST`, `PUT`, and `PATCH` send every variable. |
+| `resultVariable` | Variable to store the response in: parsed JSON when the response is JSON, otherwise the text. |
+| `timeoutSeconds` | Request timeout. Defaults to 30. |
+| `header.Name` | Sends header `Name` with this value. |
+
+A response outside the 2xx range fails the attempt.
+
+Other handlers can ship in their own jar: implement `com.intwfs.mintwf.core.spi.TaskHandlerProvider` and list the class in `META-INF/services/com.intwfs.mintwf.core.spi.TaskHandlerProvider`.
 
 ## Process Commands
 
@@ -126,9 +158,9 @@ This compiles every module, runs the tests, and writes jars to each module's `ta
 | Module | Purpose |
 |---|---|
 | `mintwf-core` | Engine core: BPMN parser, model, interpreter, and extension points. No runtime dependencies. |
-| `mintwf-store-jdbc` | Stores deployments and instances in a database, H2 by default. Not implemented yet. |
-| `mintwf-handler-http` | The `http` task handler. Not implemented yet. |
-| `mintwf-cli` | The `mintwf` command line and background worker that the skills call. Not implemented yet. |
+| `mintwf-store-jdbc` | Stores deployments, instances, and jobs in a database, H2 by default. |
+| `mintwf-handler-http` | The `http` task handler. |
+| `mintwf-cli` | The `mintwf` command line. The `worker` command works; the process commands the skills call are not implemented yet. |
 
 Java packages live under `com.intwfs.mintwf`.
 
