@@ -48,6 +48,21 @@ A minimal definition:
 </definitions>
 ```
 
+## Process Commands
+
+mintwf has no REST API. The standard BPMN process commands are provided as [Claude skills](https://docs.claude.com/en/docs/claude-code/skills) instead, so processes are deployed, started, and managed by asking Claude. The skills are not implemented yet. The planned set is:
+
+| Skill | Command |
+|---|---|
+| `deploy-process` | Deploy a BPMN 2.0 definition, creating a new version if the process already exists |
+| `start-process` | Start a process instance, with optional input variables |
+| `list-instances` | List process instances, filtered by process or state |
+| `get-instance` | Show an instance's state, active activities, and variables |
+| `complete-task` | Complete a waiting `userTask` or `receiveTask`, with optional output variables |
+| `correlate-message` | Deliver a message to the instance waiting for it |
+| `send-signal` | Broadcast a signal to every instance waiting for it |
+| `cancel-instance` | Cancel a running instance and run its compensation handlers |
+
 ## Telecom Domain
 
 Telecom operators (CSPs) run order-to-activation processes that fit a workflow model well:
