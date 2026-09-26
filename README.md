@@ -2,7 +2,7 @@
 
 A lightweight workflow engine for telecom service and resource orchestration, written entirely by AI.
 
-> **Status:** Early stage. REST endpoints for the targeted TM Forum Open APIs are implemented with in-memory storage. The workflow engine itself is not implemented yet.
+> **Status:** Early stage. The workflow engine is not implemented yet.
 
 ## Overview
 
@@ -16,20 +16,37 @@ Adam Johnston ([Intelligent Workflows LLC](https://intwfs.com)) · adam@intwfs.c
 
 ## Workflow Definition
 
-A **workflow** is a declarative description of a process. It typically consists of:
+Workflows are defined in [BPMN 2.0](https://www.omg.org/spec/BPMN/2.0.2/), the OMG standard XML format for business processes. Definitions can be drawn in any BPMN modeler and run without conversion. mintwf will execute a subset of BPMN 2.0, which will be documented here as it is implemented.
 
-| Concept | Description |
-|---|---|
-| **Workflow** | A named, versioned definition of a process, such as `ProvisionFiberService`. |
-| **Step / Task** | One unit of work, such as calling an API, transforming data, or waiting for an event. |
-| **Transition** | The rule that decides which step runs next, either sequentially or by a condition. |
-| **Input / Context** | Data that flows into the workflow and is shared or updated between steps. |
-| **Instance** | One running execution of a workflow definition with its own state. |
-| **Compensation** | The action that undoes or rolls back a completed step when a later step fails. |
+Each workflow concept maps to a BPMN element:
+
+| Concept | Description | BPMN 2.0 |
+|---|---|---|
+| **Workflow** | A named, versioned definition of a process, such as `ProvisionFiberService`. | `process` |
+| **Step / Task** | One unit of work, such as calling an API, transforming data, or waiting for an event. | `serviceTask`, `scriptTask`, `userTask`, `receiveTask` |
+| **Transition** | The rule that decides which step runs next, either sequentially or by a condition. | `sequenceFlow` with an optional `conditionExpression`, plus gateways such as `exclusiveGateway` and `parallelGateway` |
+| **Input / Context** | Data that flows into the workflow and is shared or updated between steps. | Process variables, `dataObject` |
+| **Instance** | One running execution of a workflow definition with its own state. | Process instance |
+| **Compensation** | The action that undoes or rolls back a completed step when a later step fails. | Compensation `boundaryEvent` and a task marked `isForCompensation` |
 
 A workflow definition describes *what* should happen. The engine handles *how* it runs, including ordering, state persistence, retries, error handling, and resumption.
 
-_The definition format (for example JSON, YAML, or code-first) is not decided yet and will be documented here._
+A minimal definition:
+
+```xml
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             targetNamespace="https://intwfs.com/mintwf">
+  <process id="ProvisionFiberService" isExecutable="true">
+    <startEvent id="start"/>
+    <sequenceFlow id="f1" sourceRef="start" targetRef="allocatePort"/>
+    <serviceTask id="allocatePort" name="Allocate port"/>
+    <sequenceFlow id="f2" sourceRef="allocatePort" targetRef="activate"/>
+    <serviceTask id="activate" name="Activate service"/>
+    <sequenceFlow id="f3" sourceRef="activate" targetRef="end"/>
+    <endEvent id="end"/>
+  </process>
+</definitions>
+```
 
 ## Telecom Domain
 
@@ -48,28 +65,8 @@ These processes are long-running, involve many external systems, and must surviv
 
 - **CSP:** Communication Service Provider, meaning the telecom operator.
 - **OSS / BSS:** Operations Support Systems (network-facing) and Business Support Systems (customer-facing).
-- **CFS / RFS:** Customer-Facing Service and Resource-Facing Service in the TM Forum SID model.
+- **CFS / RFS:** Customer-Facing Service and Resource-Facing Service.
 - **Fallout:** An order that could not complete automatically and needs intervention.
-
-## TMForum OpenAPIs
-
-[TM Forum](https://www.tmforum.org/) publishes the [Open APIs](https://www.tmforum.org/oda/open-apis/), a set of standardized REST APIs that telecom systems use to interoperate. mintwf is meant to fit into this ecosystem. Workflows would be triggered by these APIs and call them as steps.
-
-mintwf targets the following APIs:
-
-| API | Name | Role in mintwf |
-|---|---|---|
-| TMF701 | Process Flow Management | How the engine exposes its running workflows and their tasks |
-| TMF622 | Product Ordering | Incoming orders that start workflows |
-| TMF641 | Service Ordering | Requests creation or modification of services |
-| TMF652 | Resource Ordering | Requests allocation of network resources |
-| TMF640 | Service Activation & Configuration | Activates or configures a service on the network |
-| TMF702 | Resource Activation | Activates or configures network resources |
-| TMF638 | Service Inventory | Where finished steps record service state |
-| TMF639 | Resource Inventory | Where finished steps record resource state |
-| TMF688 | Event Management | Lets workflows react to events instead of polling |
-
-TMF701 matters most here because it defines a standard way to represent and query running process flows and their tasks.
 
 ## Getting Started
 
