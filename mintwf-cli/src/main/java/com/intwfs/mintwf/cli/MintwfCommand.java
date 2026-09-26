@@ -1,5 +1,6 @@
 package com.intwfs.mintwf.cli;
 
+import com.intwfs.mintwf.cli.command.Commands;
 import com.intwfs.mintwf.cli.worker.WorkerCommand;
 import com.intwfs.mintwf.core.Mintwf;
 import com.intwfs.mintwf.core.api.ProcessEngine;
@@ -11,10 +12,11 @@ import picocli.CommandLine.Option;
 
 /**
  * The {@code mintwf} command. Subcommands share one engine, configured from the options here.
+ *
+ * <p>Process commands print JSON on standard output; see {@link JsonOutput} for the error format and exit codes.
  */
 @Command(name = "mintwf", mixinStandardHelpOptions = true, versionProvider = MintwfCommand.Version.class,
-        description = "Micro Intelligent Workflow: deploy and run BPMN 2.0 processes.",
-        subcommands = {WorkerCommand.class})
+        description = "Micro Intelligent Workflow: deploy and run BPMN 2.0 processes.")
 public final class MintwfCommand {
 
     /** Environment variable that sets the database when {@code --database} is not given. */
@@ -28,7 +30,18 @@ public final class MintwfCommand {
     private ProcessEngine engine;
 
     public static void main(String[] args) {
-        System.exit(new CommandLine(new MintwfCommand()).execute(args));
+        System.exit(commandLine().execute(args));
+    }
+
+    /**
+     * Returns the full command tree, with errors reported as JSON.
+     */
+    public static CommandLine commandLine() {
+        CommandLine commandLine = new CommandLine(new MintwfCommand());
+        Commands.all().forEach(commandLine::addSubcommand);
+        commandLine.addSubcommand(new WorkerCommand());
+        commandLine.setExecutionExceptionHandler(JsonOutput::error);
+        return commandLine;
     }
 
     /**

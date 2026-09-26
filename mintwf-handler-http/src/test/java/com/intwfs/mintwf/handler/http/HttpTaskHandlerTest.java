@@ -93,6 +93,18 @@ class HttpTaskHandlerTest {
         assertTrue(error.endsWith("/broken returned 503: maintenance window"), error);
     }
 
+    @Test
+    void namesTheRequestWhenItCannotConnect() {
+        String closed = baseUrl;
+        server.stop(0);
+
+        String error = run("""
+                <mintwf:field name="url" value="%s/ports"/>
+                """.formatted(closed), Map.of()).incidents().getFirst().error();
+
+        assertEquals("serviceTask 'call' failed: POST " + closed + "/ports could not connect", error);
+    }
+
     private ProcessInstance run(String fields, Map<String, Object> variables) {
         engine.deploy("""
                 <?xml version="1.0" encoding="UTF-8"?>

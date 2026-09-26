@@ -24,7 +24,8 @@ out/
 .project
 .settings/
 .factorypath
-bin/
+# Eclipse output inside modules; the root bin/ holds the launchers
+*/bin/
 .vscode/
 
 # OS
@@ -33,3 +34,6 @@ Thumbs.db
 
 # Environment
 *.env
+
+# Default mintwf database created by the CLI
+.mintwf/

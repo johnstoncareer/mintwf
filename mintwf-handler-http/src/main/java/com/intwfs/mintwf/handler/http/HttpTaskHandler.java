@@ -3,11 +3,13 @@ package com.intwfs.mintwf.handler.http;
 import com.intwfs.mintwf.core.spi.TaskContext;
 import com.intwfs.mintwf.core.spi.TaskHandler;
 import java.io.IOException;
+import java.net.ConnectException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.LinkedHashMap;
@@ -97,8 +99,14 @@ public final class HttpTaskHandler implements TaskHandler {
                     .method(method, HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
         }
 
-        HttpResponse<String> response =
-                client.send(request.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        HttpResponse<String> response;
+        try {
+            response = client.send(request.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        } catch (HttpTimeoutException e) {
+            throw new IOException(method + " " + uri + " timed out", e);
+        } catch (ConnectException e) {
+            throw new IOException(method + " " + uri + " could not connect", e);
+        }
         if (response.statusCode() < 200 || response.statusCode() > 299) {
             throw new IOException(method + " " + uri + " returned " + response.statusCode() + errorBody(response));
         }

@@ -4,6 +4,7 @@
 # Shell scripts must keep LF endings to run on macOS/Linux
 mvnw text eol=lf
 *.sh text eol=lf
+bin/mintwf text eol=lf
 
 # Windows scripts use CRLF
 *.cmd text eol=crlf

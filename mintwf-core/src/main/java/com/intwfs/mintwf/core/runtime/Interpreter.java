@@ -165,8 +165,17 @@ public final class Interpreter {
         } catch (MintwfException e) {
             throw e;
         } catch (Exception e) {
-            throw new ProcessExecutionException(describe(task) + " failed: " + e.getMessage(), e);
+            throw new ProcessExecutionException(describe(task) + " failed: " + reason(e), e);
         }
+    }
+
+    /** Returns the exception's message, or its type and cause when it has none. */
+    private static String reason(Throwable e) {
+        if (e.getMessage() != null && !e.getMessage().isBlank()) {
+            return e.getMessage();
+        }
+        String type = e.getClass().getSimpleName();
+        return e.getCause() == null ? type : type + ": " + reason(e.getCause());
     }
 
     /** The working copy of one instance during one command. */

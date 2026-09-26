@@ -31,7 +31,7 @@ class MintwfCommandTest {
     @Test
     void printsHelpAndRejectsUnknownOptions() {
         StringWriter out = new StringWriter();
-        CommandLine command = new CommandLine(new MintwfCommand()).setOut(new PrintWriter(out))
+        CommandLine command = MintwfCommand.commandLine().setOut(new PrintWriter(out))
                 .setErr(new PrintWriter(new StringWriter()));
 
         assertEquals(0, command.execute("worker", "--help"));

@@ -2,7 +2,7 @@
 
 A lightweight workflow engine for telecom service and resource orchestration, written entirely by AI.
 
-> **Status:** Early stage. The engine runs the BPMN subset below, stores state in H2, and runs service tasks as retried jobs in a background worker. The process command CLI and the skills are not implemented yet.
+> **Status:** Early stage. The engine runs the BPMN subset below, stores state in H2, and runs service tasks as retried jobs in a background worker. Processes are managed through Claude skills or the `mintwf` command line. Messages, signals, timers, and compensation are not implemented yet.
 
 ## Overview
 
@@ -101,19 +101,28 @@ Other handlers can ship in their own jar: implement `com.intwfs.mintwf.core.spi.
 
 ## Process Commands
 
-mintwf has no REST API. The standard BPMN process commands are provided as [Claude skills](https://docs.claude.com/en/docs/claude-code/skills) instead, so processes are deployed, started, and managed by asking Claude. The skills are not implemented yet. The planned set is:
+mintwf has no REST API. The standard BPMN process commands are provided as [Claude skills](https://docs.claude.com/en/docs/claude-code/skills) instead, so processes are deployed, started, and managed by asking Claude in this repository, for example "deploy provision.bpmn and start it for order 42". The skills live in [.claude/skills/](.claude/skills/).
+
+Each skill runs the matching `bin/mintwf` command, which you can also run yourself:
 
 | Skill | Command |
 |---|---|
-| `deploy-process` | Deploy a BPMN 2.0 definition, creating a new version if the process already exists |
-| `start-process` | Start a process instance, with optional input variables |
-| `list-instances` | List process instances, filtered by process or state |
-| `get-instance` | Show an instance's state, active activities, and variables |
-| `complete-task` | Complete a waiting `userTask` or `receiveTask`, with optional output variables |
-| `correlate-message` | Deliver a message to the instance waiting for it |
-| `send-signal` | Broadcast a signal to every instance waiting for it |
-| `cancel-instance` | Cancel a running instance and run its compensation handlers |
-| `retry-incident` | Retry a failed step that has exhausted its automatic retries |
+| `deploy-process` | `bin/mintwf deploy-process FILE`: deploy a BPMN 2.0 file, creating a new version if the content changed |
+| `start-process` | `bin/mintwf start-process PROCESS [--business-key KEY] [--vars JSON]`: start an instance |
+| `list-instances` | `bin/mintwf list-instances [--process PROCESS] [--status STATUS]`: list instances |
+| `get-instance` | `bin/mintwf get-instance INSTANCE`: show an instance's status, position, tasks, incidents, and variables |
+| `complete-task` | `bin/mintwf complete-task INSTANCE TASK [--vars JSON]`: complete a waiting `userTask` or `receiveTask` |
+| `retry-incident` | `bin/mintwf retry-incident INSTANCE JOB`: give a failed service task a fresh set of attempts |
+| `cancel-instance` | `bin/mintwf cancel-instance INSTANCE`: cancel a running instance |
+| `start-worker` | `bin/mintwf worker`: run service task jobs until stopped. Service tasks only progress while a worker runs. |
+| `correlate-message` | Not implemented yet: deliver a message to the instance waiting for it |
+| `send-signal` | Not implemented yet: broadcast a signal to every instance waiting for it |
+
+Variables can also come from a file with `--vars-file FILE`. Commands print JSON. A failed command prints `{"error": {"type": ..., "message": ...}}` and exits with 1; the types are `not_found`, `invalid_bpmn`, `execution_failed`, `invalid_input`, `io_error`, and `internal_error`. Invalid arguments exit with 2.
+
+All commands use the H2 database `.mintwf/mintwf` under the current directory. Choose another with `--database PATH` before the command name, or the `MINTWF_DATABASE` environment variable. The CLI and a running worker can use the same database at the same time.
+
+`bin/mintwf` builds `mintwf-cli/target/mintwf.jar` on first use and whenever the sources are newer. On Windows cmd or PowerShell, use `bin\mintwf.cmd`, which builds the jar only when it is missing.
 
 ## Telecom Domain
 
@@ -151,7 +160,16 @@ mintwf is written in **Java 25** and built with **Maven**.
 mvnw.cmd verify      # Windows cmd / PowerShell
 ```
 
-This compiles every module, runs the tests, and writes jars to each module's `target/` directory.
+This compiles every module, runs the tests, and writes jars to each module's `target/` directory, including the runnable `mintwf-cli/target/mintwf.jar`.
+
+### Try it
+
+```sh
+bin/mintwf deploy-process my-process.bpmn  # the first run builds the CLI
+bin/mintwf worker &                        # run service task jobs in the background
+bin/mintwf start-process MyProcess --vars '{"orderId": "42"}'
+bin/mintwf list-instances --status ACTIVE
+```
 
 ### Project layout
 
@@ -160,7 +178,7 @@ This compiles every module, runs the tests, and writes jars to each module's `ta
 | `mintwf-core` | Engine core: BPMN parser, model, interpreter, and extension points. No runtime dependencies. |
 | `mintwf-store-jdbc` | Stores deployments, instances, and jobs in a database, H2 by default. |
 | `mintwf-handler-http` | The `http` task handler. |
-| `mintwf-cli` | The `mintwf` command line. The `worker` command works; the process commands the skills call are not implemented yet. |
+| `mintwf-cli` | The `mintwf` command line and worker, packaged as `mintwf.jar`. |
 
 Java packages live under `com.intwfs.mintwf`.
 

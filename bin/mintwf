@@ -1,0 +1,13 @@
+#!/bin/sh
+# Runs the mintwf CLI. Builds mintwf-cli/target/mintwf.jar first when it is missing or older than the sources.
+set -e
+root=$(cd "$(dirname "$0")/.." && pwd)
+jar="$root/mintwf-cli/target/mintwf.jar"
+
+if [ ! -f "$jar" ] || [ -n "$(find "$root" -path "$root/*/src/main/*" -newer "$jar" -type f -print -quit)" ] \
+        || [ -n "$(find "$root" -name pom.xml -newer "$jar" -not -path '*/target/*' -print -quit)" ]; then
+    echo "mintwf: building the CLI..." >&2
+    (cd "$root" && ./mvnw -q -pl mintwf-cli -am package -DskipTests) >&2
+fi
+
+exec java -jar "$jar" "$@"

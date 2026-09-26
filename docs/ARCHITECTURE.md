@@ -41,8 +41,8 @@ All modules exist. Packages that later phases fill contain only a `package-info.
 |---|---|---|---|
 | `com.intwfs.mintwf.store.jdbc` | `mintwf-store-jdbc` | `JdbcProcessStore` and schema migrations | 2 (done) |
 | `com.intwfs.mintwf.handler.http` | `mintwf-handler-http` | `http` task handler | 2 (done) |
-| `com.intwfs.mintwf.cli` | `mintwf-cli` | `mintwf` entry point and engine configuration (done); JSON output | 3 |
-| `com.intwfs.mintwf.cli.command` | `mintwf-cli` | One command per process command skill | 3 |
+| `com.intwfs.mintwf.cli` | `mintwf-cli` | `mintwf` entry point, engine configuration, JSON output and error mapping | 3 (done) |
+| `com.intwfs.mintwf.cli.command` | `mintwf-cli` | One command per process command skill | 3 (done) |
 | `com.intwfs.mintwf.cli.worker` | `mintwf-cli` | `mintwf worker`: runs due jobs until stopped | 2 (done) |
 
 ## Core packages
@@ -58,6 +58,16 @@ All code lives under `com.intwfs.mintwf.core`.
 | `api` | `ProcessEngine` facade: `deploy`, `start`, `completeTask`, `cancel`, `retryIncident`, queries, and `executeDueJobs`, with `correlateMessage` and `sendSignal` to come. Maps one-to-one to the skills. |
 | `spi` | Extension points: `ProcessStore`, `TaskHandler`, `TaskHandlerProvider`, `ExpressionEvaluator`. Also the persisted records `InstanceState`, `Execution`, `Job`, and `DeploymentRecord`, and `InstanceChange`, the unit a store saves atomically. Time comes from an injectable `java.time.Clock`. |
 | `job` | `RetryPolicy` and `JobWorker`, the background loop that calls `executeDueJobs`. |
+
+## CLI and skills
+
+Each skill in `.claude/skills/` runs one `bin/mintwf` subcommand with the same name, such as `bin/mintwf start-process`. The `start-worker` skill runs `bin/mintwf worker` in the background.
+
+- `bin/mintwf` runs `mintwf-cli/target/mintwf.jar`, a shaded jar with every module and dependency. It rebuilds the jar first when the jar is missing or older than any module source or POM. `bin/mintwf.cmd` does the same for cmd and PowerShell, but only builds when the jar is missing.
+- Commands print their result as indented JSON on standard output: a `DeployedProcess`, a `ProcessInstance`, or an array of them.
+- A failed command prints `{"error": {"type": ..., "message": ...}}` and exits with 1. The type is derived from the exception: `not_found`, `invalid_bpmn`, `execution_failed`, `invalid_input`, `io_error`, or `internal_error`. Invalid arguments are reported by picocli on standard error with exit code 2.
+- Variables are passed as a JSON object with `--vars` or `--vars-file`.
+- The database is `--database PATH`, else `$MINTWF_DATABASE`, else `.mintwf/mintwf` under the current directory.
 
 ## Runtime semantics
 
@@ -141,7 +151,7 @@ A worker claims a job with `UPDATE mintwf_job SET lock_owner = ?, lock_expiry = 
 |---|---|
 | 1. Core, in memory | Start and end events, `sequenceFlow`, `serviceTask` (synchronous), `userTask`, `receiveTask`, `exclusiveGateway`, `parallelGateway`; the parser with subset validation; the in-memory store |
 | 2. Durability | `mintwf-store-jdbc`, the job model, async service tasks, retries, incidents, the worker |
-| 3. CLI and skills | `mintwf-cli` and all process command skills, including `retry-incident` |
+| 3. CLI and skills | `mintwf-cli` process commands, the runnable jar and launchers, and a skill per command, including `retry-incident` and `start-worker`. `correlate-message` and `send-signal` follow in phase 4. |
 | 4. Events | Message and signal catch events, intermediate and boundary timers, boundary error events |
 | 5. Structure | Compensation, `subProcess`, `callActivity` |
 
