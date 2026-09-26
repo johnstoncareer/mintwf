@@ -2,7 +2,7 @@
 
 A lightweight workflow engine for telecom service and resource orchestration, written entirely by AI.
 
-> **Status:** Early stage. The workflow engine is not implemented yet.
+> **Status:** Early stage. The in-memory engine core runs the BPMN subset below. Persistence, the CLI, and the skills are not implemented yet.
 
 ## Overview
 
@@ -16,7 +16,7 @@ Adam Johnston ([Intelligent Workflows LLC](https://intwfs.com)) · adam@intwfs.c
 
 ## Workflow Definition
 
-Workflows are defined in [BPMN 2.0](https://www.omg.org/spec/BPMN/2.0.2/), the OMG standard XML format for business processes. Definitions can be drawn in any BPMN modeler and run without conversion. mintwf will execute a subset of BPMN 2.0, which will be documented here as it is implemented.
+Workflows are defined in [BPMN 2.0](https://www.omg.org/spec/BPMN/2.0.2/), the OMG standard XML format for business processes. Definitions can be drawn in any BPMN modeler and run without conversion. mintwf executes the subset of BPMN 2.0 listed under [Supported BPMN](#supported-bpmn).
 
 Each workflow concept maps to a BPMN element:
 
@@ -35,18 +35,37 @@ A minimal definition:
 
 ```xml
 <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:mintwf="https://intwfs.com/mintwf"
              targetNamespace="https://intwfs.com/mintwf">
   <process id="ProvisionFiberService" isExecutable="true">
     <startEvent id="start"/>
     <sequenceFlow id="f1" sourceRef="start" targetRef="allocatePort"/>
-    <serviceTask id="allocatePort" name="Allocate port"/>
+    <serviceTask id="allocatePort" name="Allocate port" mintwf:type="inventory"/>
     <sequenceFlow id="f2" sourceRef="allocatePort" targetRef="activate"/>
-    <serviceTask id="activate" name="Activate service"/>
+    <serviceTask id="activate" name="Activate service" mintwf:type="activation"/>
     <sequenceFlow id="f3" sourceRef="activate" targetRef="end"/>
     <endEvent id="end"/>
   </process>
 </definitions>
 ```
+
+### Supported BPMN
+
+A document must contain exactly one `process` with `isExecutable="true"`. Other processes, such as the pools of external participants, are ignored. Anything else inside the executable process is rejected at deploy time with the id of the unsupported element.
+
+| Element | Behavior |
+|---|---|
+| `startEvent` | Exactly one, without an event definition. |
+| `endEvent` | Without an event definition. The instance completes when every token has reached an end event. |
+| `serviceTask` | Runs the task handler named by `mintwf:type`. Handler settings go in `<mintwf:field name="..." value="..."/>` inside `extensionElements`. |
+| `userTask`, `receiveTask` | Waits until the task is completed with `complete-task`. |
+| `exclusiveGateway` | Takes the first outgoing flow, in document order, whose condition is true, or else the `default` flow. |
+| `parallelGateway` | Waits for a token on every incoming flow, then continues on every outgoing flow. |
+| `sequenceFlow` | An optional `conditionExpression`. A task leaves by every flow whose condition is true, or by its `default` flow if none is. |
+
+`documentation`, `extensionElements`, `laneSet`, `textAnnotation`, `association`, and diagram information are allowed and ignored.
+
+Conditions use a small expression language: variable paths such as `order.site.region`, number, string, `true`, `false` and `null` literals, `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`, and parentheses. A condition may be wrapped in `${...}`. Variables hold JSON values only: strings, numbers, booleans, null, lists, and maps.
 
 ## Process Commands
 
@@ -106,11 +125,14 @@ This compiles every module, runs the tests, and writes jars to each module's `ta
 
 | Module | Purpose |
 |---|---|
-| `mintwf-core` | Engine core: workflow definitions, execution, and state |
+| `mintwf-core` | Engine core: BPMN parser, model, interpreter, and extension points. No runtime dependencies. |
+| `mintwf-store-jdbc` | Stores deployments and instances in a database, H2 by default. Not implemented yet. |
+| `mintwf-handler-http` | The `http` task handler. Not implemented yet. |
+| `mintwf-cli` | The `mintwf` command line and background worker that the skills call. Not implemented yet. |
 
 Java packages live under `com.intwfs.mintwf`.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the planned modules, runtime design, and delivery phases.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the modules, packages, runtime design, and delivery phases.
 
 ## Contributing
 

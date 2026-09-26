@@ -21,6 +21,9 @@
 
     <modules>
         <module>mintwf-core</module>
+        <module>mintwf-store-jdbc</module>
+        <module>mintwf-handler-http</module>
+        <module>mintwf-cli</module>
     </modules>
 
     <properties>
@@ -28,10 +31,45 @@
         <maven.compiler.parameters>true</maven.compiler.parameters>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <junit.version>6.0.3</junit.version>
+        <jackson.version>3.1.5</jackson.version>
+        <h2.version>2.4.240</h2.version>
+        <picocli.version>4.7.7</picocli.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
+            <dependency>
+                <groupId>com.intwfs.mintwf</groupId>
+                <artifactId>mintwf-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.intwfs.mintwf</groupId>
+                <artifactId>mintwf-store-jdbc</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.intwfs.mintwf</groupId>
+                <artifactId>mintwf-handler-http</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>tools.jackson</groupId>
+                <artifactId>jackson-bom</artifactId>
+                <version>${jackson.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.h2database</groupId>
+                <artifactId>h2</artifactId>
+                <version>${h2.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>info.picocli</groupId>
+                <artifactId>picocli</artifactId>
+                <version>${picocli.version}</version>
+            </dependency>
             <!-- Every module tests on the same JUnit version. -->
             <dependency>
                 <groupId>org.junit</groupId>

@@ -27,10 +27,23 @@ This document describes how mintwf is structured and why. It is the reference fo
 |---|---|---|
 | `mintwf-core` | Model, parser, runtime, SPIs, in-memory store | JDK only |
 | `mintwf-store-jdbc` | JDBC `ProcessStore`, schema migrations | H2, Jackson (variable serialization) |
-| `mintwf-cli` | CLI commands and the `worker` subcommand, packaged as a single executable jar | core, store-jdbc, picocli |
+| `mintwf-handler-http` | The `http` task handler, discovered through `TaskHandlerProvider` | core, Jackson |
+| `mintwf-cli` | CLI commands and the `worker` subcommand, packaged as a single executable jar | core, store-jdbc, handler-http, picocli, Jackson |
 | `.claude/skills/*` | One `SKILL.md` per process command, each calling the CLI | none |
 
-Only `mintwf-core` exists today. The other modules are added in the phases below.
+The HTTP handler is its own module because it needs a JSON library, which core must not depend on. It is also the model for third-party handler jars.
+
+All modules exist. Packages that later phases fill contain only a `package-info.java` that says so.
+
+### Packages outside core
+
+| Package | Module | Responsibility | Phase |
+|---|---|---|---|
+| `com.intwfs.mintwf.store.jdbc` | `mintwf-store-jdbc` | `JdbcProcessStore` and schema migrations | 2 |
+| `com.intwfs.mintwf.handler.http` | `mintwf-handler-http` | `http` task handler | 2 |
+| `com.intwfs.mintwf.cli` | `mintwf-cli` | `mintwf` entry point, engine configuration, JSON output | 3 |
+| `com.intwfs.mintwf.cli.command` | `mintwf-cli` | One command per process command skill | 3 |
+| `com.intwfs.mintwf.cli.worker` | `mintwf-cli` | `mintwf worker`: runs due jobs until stopped | 2 |
 
 ## Core packages
 
@@ -39,16 +52,27 @@ All code lives under `com.intwfs.mintwf.core`.
 | Package | Responsibility |
 |---|---|
 | `model` | Immutable graph of a deployed process: `ProcessDefinition`, `FlowNode` subtypes, `SequenceFlow`. Keyed by `(processKey, version)`. |
-| `parser` | Validates XML against the bundled OMG XSDs (`javax.xml.validation`), then reads it with StAX into the model. Rejects unsupported elements with the offending element id. |
-| `runtime` | Token-based interpreter. One `NodeBehavior` per node type. |
-| `api` | `ProcessEngine` facade: `deploy`, `start`, `completeTask`, `correlateMessage`, `sendSignal`, `cancel`, `retryIncident`, and queries. Maps one-to-one to the skills. |
-| `spi` | Extension points: `ProcessStore`, `TaskHandler`, `ExpressionEvaluator`, `Clock`. |
+| `parser` | Parses XML into a DOM while validating it against the bundled OMG XSDs, then builds the model. Rejects unsupported elements with the offending element id. |
+| `expression` | `SimpleExpressionEvaluator`, the built-in condition language. |
+| `runtime` | `Interpreter` (the token interpreter), `InMemoryProcessStore`, and variable validation. Internal. |
+| `api` | `ProcessEngine` facade: `deploy`, `start`, `completeTask`, `cancel`, and queries, with `correlateMessage`, `sendSignal`, and `retryIncident` to come. Maps one-to-one to the skills. |
+| `spi` | Extension points: `ProcessStore`, `TaskHandler`, `TaskHandlerProvider`, `ExpressionEvaluator`. Also the persisted state records `InstanceState`, `Execution`, and `DeploymentRecord`. Time comes from an injectable `java.time.Clock`. |
+| `job` | Job model, retry policy, incidents, and the executor that claims and runs due jobs. Phase 2. |
 
 ## Runtime semantics
 
 ### Execution model
 
-A process instance holds a set of **executions** (tokens), each positioned on a flow node, plus a variable scope. Each node type has a `NodeBehavior` that handles a token entering and leaving the node.
+A process instance holds a set of **executions** (tokens), each positioned on a flow node, plus a variable scope. Execution ids are sequential numbers within the instance. A token on a `userTask` or `receiveTask` is an open task, and its execution id is the task id.
+
+How each node type treats a token:
+
+- **Start event, service task, user task, receive task:** leave by every outgoing flow whose condition is true or absent. If none applies, leave by the `default` flow.
+- **Exclusive gateway:** leave by the first outgoing flow, in document order, whose condition is true. If none applies, leave by the `default` flow.
+- **Parallel gateway:** wait until a token has arrived on every incoming flow, merge them, then leave by every outgoing flow.
+- **End event:** consume the token. The instance completes when no tokens remain.
+
+One command visits at most 10,000 nodes, which stops loops that never reach a wait state.
 
 A command runs the instance synchronously until every token is at a wait state:
 
@@ -57,6 +81,8 @@ A command runs the instance synchronously until every token is at a wait state:
 - an async job (see below)
 
 The resulting state is then saved in one transaction. A failure before the save rolls the instance back to its previous wait state.
+
+In phase 1, service tasks run synchronously inside the command, so a failed handler makes the command fail and leaves the instance unchanged.
 
 ### Service tasks
 
@@ -119,4 +145,5 @@ Each phase adds its supported elements to the BPMN subset documented in the READ
 |---|---|---|
 | How skills reach the engine | One-shot CLI and a worker sharing a database | Nothing to host or secure. Considered instead: a daemon reached over a local socket, which adds an IPC layer. |
 | Default database | H2 embedded, `AUTO_SERVER=TRUE` | Pure Java, so no native driver. Auto-server mode allows the CLI and worker to share the file. |
-| Dependency management | JUnit BOM plus explicitly pinned versions | The project no longer uses Spring, so it no longer imports the Spring Boot BOM. |
+| Dependency management | JUnit and Jackson BOMs plus explicitly pinned versions | The project no longer uses Spring, so it no longer imports the Spring Boot BOM. |
+| BPMN parsing | DOM with schema validation during the parse | Process files are small. A DOM makes the subset checks simple, and validating while parsing needs only one pass. |

@@ -1,0 +1,288 @@
+package com.intwfs.mintwf.core.api;
+
+import com.intwfs.mintwf.core.expression.SimpleExpressionEvaluator;
+import com.intwfs.mintwf.core.model.FlowNode;
+import com.intwfs.mintwf.core.model.ProcessDefinition;
+import com.intwfs.mintwf.core.model.ReceiveTask;
+import com.intwfs.mintwf.core.model.UserTask;
+import com.intwfs.mintwf.core.parser.BpmnParseException;
+import com.intwfs.mintwf.core.parser.BpmnParser;
+import com.intwfs.mintwf.core.runtime.ExecutableProcess;
+import com.intwfs.mintwf.core.runtime.InMemoryProcessStore;
+import com.intwfs.mintwf.core.runtime.Interpreter;
+import com.intwfs.mintwf.core.spi.DeploymentRecord;
+import com.intwfs.mintwf.core.spi.Execution;
+import com.intwfs.mintwf.core.spi.ExpressionEvaluator;
+import com.intwfs.mintwf.core.spi.InstanceState;
+import com.intwfs.mintwf.core.spi.OptimisticLockException;
+import com.intwfs.mintwf.core.spi.ProcessStore;
+import com.intwfs.mintwf.core.spi.TaskHandler;
+import com.intwfs.mintwf.core.spi.TaskHandlerProvider;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Clock;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.ServiceLoader;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
+
+/**
+ * The entry point for deploying processes and running instances. Each method is one command, matching one process
+ * command skill. Instances of this class are thread-safe.
+ *
+ * <pre>{@code
+ * ProcessEngine engine = ProcessEngine.builder()
+ *         .taskHandler("allocatePort", context -> context.setVariable("port", "ge-0/0/1"))
+ *         .build();
+ * engine.deploy(bpmnXml);
+ * ProcessInstance instance = engine.start("ProvisionFiberService", Map.of("customerId", "C-42"));
+ * }</pre>
+ */
+public final class ProcessEngine {
+
+    /** How many times a command is retried after losing a race with a concurrent write. */
+    private static final int MAX_ATTEMPTS = 3;
+
+    private final ProcessStore store;
+    private final ExpressionEvaluator evaluator;
+    private final Clock clock;
+    private final Interpreter interpreter;
+    private final BpmnParser parser = new BpmnParser();
+    private final Map<String, ExecutableProcess> processes = new ConcurrentHashMap<>();
+
+    private ProcessEngine(Builder builder, Map<String, TaskHandler> handlers) {
+        this.store = builder.store;
+        this.evaluator = builder.evaluator;
+        this.clock = builder.clock;
+        this.interpreter = new Interpreter(handlers, clock);
+    }
+
+    public static Builder builder() {
+        return new Builder();
+    }
+
+    /**
+     * Deploys a BPMN 2.0 document. Content that differs from the latest version of the process becomes a new
+     * version; identical content is not deployed again.
+     *
+     * @throws BpmnParseException if the document is invalid or uses unsupported BPMN
+     */
+    public DeployedProcess deploy(byte[] bpmnXml) {
+        ProcessDefinition definition = parser.parse(bpmnXml);
+        ExecutableProcess.compile(definition, 0, evaluator);
+        String hash = sha256(bpmnXml);
+        return withRetry(() -> {
+            DeploymentRecord latest = store.latestDeployment(definition.key()).orElse(null);
+            if (latest != null && latest.hash().equals(hash)) {
+                return deployed(latest, false);
+            }
+            DeploymentRecord record = new DeploymentRecord(definition.key(),
+                    latest == null ? 1 : latest.version() + 1, definition.name(), hash, bpmnXml, clock.instant());
+            store.insertDeployment(record);
+            return deployed(record, true);
+        });
+    }
+
+    /**
+     * Starts an instance of the latest version of a process.
+     *
+     * @throws NotFoundException if no process with this key is deployed
+     * @throws ProcessExecutionException if the instance fails before reaching its first wait state
+     */
+    public ProcessInstance start(String processKey, Map<String, ?> variables) {
+        return start(processKey, null, variables);
+    }
+
+    /**
+     * Starts an instance of the latest version of a process, tagged with a business key such as an order id.
+     *
+     * @throws NotFoundException if no process with this key is deployed
+     * @throws ProcessExecutionException if the instance fails before reaching its first wait state
+     */
+    public ProcessInstance start(String processKey, String businessKey, Map<String, ?> variables) {
+        Objects.requireNonNull(processKey, "processKey");
+        DeploymentRecord deployment = store.latestDeployment(processKey)
+                .orElseThrow(() -> new NotFoundException("no process '" + processKey + "' is deployed"));
+        ExecutableProcess process = executable(deployment.processKey(), deployment.version());
+        InstanceState state = interpreter.start(process, UUID.randomUUID().toString(), businessKey, variables);
+        store.insertInstance(state);
+        return view(state);
+    }
+
+    /**
+     * Completes an open {@code userTask} or {@code receiveTask}, sets {@code variables} on the instance, and runs
+     * the instance to its next wait state.
+     *
+     * @param taskId a task id from {@link ProcessInstance#tasks()}
+     * @throws NotFoundException if the instance or task does not exist
+     * @throws ProcessExecutionException if the instance is not active or fails while running on
+     */
+    public ProcessInstance completeTask(String instanceId, String taskId, Map<String, ?> variables) {
+        return update(instanceId, (process, state) -> interpreter.completeTask(process, state, taskId, variables));
+    }
+
+    /**
+     * Cancels an active instance.
+     *
+     * @throws NotFoundException if the instance does not exist
+     * @throws ProcessExecutionException if the instance is not active
+     */
+    public ProcessInstance cancel(String instanceId) {
+        return update(instanceId, (process, state) -> interpreter.cancel(state));
+    }
+
+    /**
+     * @throws NotFoundException if the instance does not exist
+     */
+    public ProcessInstance instance(String instanceId) {
+        return view(load(instanceId));
+    }
+
+    /**
+     * Returns the matching instances, oldest first.
+     */
+    public List<ProcessInstance> instances(InstanceQuery query) {
+        return store.instances(query).stream().map(this::view).toList();
+    }
+
+    private interface Command {
+        InstanceState apply(ExecutableProcess process, InstanceState state);
+    }
+
+    private ProcessInstance update(String instanceId, Command command) {
+        return withRetry(() -> {
+            InstanceState state = load(instanceId);
+            InstanceState next = command.apply(executable(state.processKey(), state.processVersion()), state);
+            store.updateInstance(next, state.revision());
+            return view(next);
+        });
+    }
+
+    private InstanceState load(String instanceId) {
+        Objects.requireNonNull(instanceId, "instanceId");
+        return store.instance(instanceId)
+                .orElseThrow(() -> new NotFoundException("no instance '" + instanceId + "'"));
+    }
+
+    private ExecutableProcess executable(String processKey, int version) {
+        return processes.computeIfAbsent(processKey + "@" + version, cacheKey -> {
+            DeploymentRecord deployment = store.deployment(processKey, version).orElseThrow(
+                    () -> new NotFoundException("process '" + processKey + "' version " + version + " is missing"));
+            return ExecutableProcess.compile(parser.parse(deployment.xml()), version, evaluator);
+        });
+    }
+
+    private ProcessInstance view(InstanceState state) {
+        ProcessDefinition definition = executable(state.processKey(), state.processVersion()).definition();
+        List<String> active = new ArrayList<>();
+        List<Task> tasks = new ArrayList<>();
+        for (Execution execution : state.executions()) {
+            active.add(execution.nodeId());
+            FlowNode node = definition.node(execution.nodeId());
+            if (node instanceof UserTask) {
+                tasks.add(new Task(execution.id(), node.id(), node.name(), Task.Type.USER_TASK));
+            } else if (node instanceof ReceiveTask) {
+                tasks.add(new Task(execution.id(), node.id(), node.name(), Task.Type.RECEIVE_TASK));
+            }
+        }
+        return new ProcessInstance(state.id(), state.processKey(), state.processVersion(), state.businessKey(),
+                state.status(), state.variables(), List.copyOf(active), List.copyOf(tasks), state.startedAt(),
+                state.endedAt());
+    }
+
+    private static <T> T withRetry(Supplier<T> command) {
+        for (int attempt = 1; ; attempt++) {
+            try {
+                return command.get();
+            } catch (OptimisticLockException e) {
+                if (attempt == MAX_ATTEMPTS) {
+                    throw e;
+                }
+            }
+        }
+    }
+
+    private static DeployedProcess deployed(DeploymentRecord record, boolean created) {
+        return new DeployedProcess(record.processKey(), record.version(), record.name(), record.hash(),
+                record.deployedAt(), created);
+    }
+
+    private static String sha256(byte[] bytes) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * Configures a {@link ProcessEngine}. Every setting has a default: an in-memory store, the built-in expression
+     * language, the system UTC clock, and the task handlers found through {@link TaskHandlerProvider}.
+     */
+    public static final class Builder {
+
+        private ProcessStore store = new InMemoryProcessStore();
+        private ExpressionEvaluator evaluator = new SimpleExpressionEvaluator();
+        private Clock clock = Clock.systemUTC();
+        private final Map<String, TaskHandler> handlers = new HashMap<>();
+        private boolean discoverHandlers = true;
+
+        private Builder() {
+        }
+
+        public Builder store(ProcessStore store) {
+            this.store = Objects.requireNonNull(store, "store");
+            return this;
+        }
+
+        public Builder expressionEvaluator(ExpressionEvaluator evaluator) {
+            this.evaluator = Objects.requireNonNull(evaluator, "evaluator");
+            return this;
+        }
+
+        public Builder clock(Clock clock) {
+            this.clock = Objects.requireNonNull(clock, "clock");
+            return this;
+        }
+
+        /**
+         * Registers the handler for serviceTasks with {@code mintwf:type="type"}. It takes precedence over a
+         * discovered handler of the same type.
+         */
+        public Builder taskHandler(String type, TaskHandler handler) {
+            handlers.put(Objects.requireNonNull(type, "type"), Objects.requireNonNull(handler, "handler"));
+            return this;
+        }
+
+        /**
+         * Sets whether to load handlers through {@link ServiceLoader}. On by default.
+         */
+        public Builder discoverTaskHandlers(boolean discover) {
+            this.discoverHandlers = discover;
+            return this;
+        }
+
+        /**
+         * @throws IllegalStateException if two discovered providers serve the same type
+         */
+        public ProcessEngine build() {
+            Map<String, TaskHandler> all = new HashMap<>();
+            if (discoverHandlers) {
+                for (TaskHandlerProvider provider : ServiceLoader.load(TaskHandlerProvider.class)) {
+                    if (all.putIfAbsent(provider.type(), provider.handler()) != null) {
+                        throw new IllegalStateException(
+                                "more than one TaskHandlerProvider serves type '" + provider.type() + "'");
+                    }
+                }
+            }
+            all.putAll(handlers);
+            return new ProcessEngine(this, all);
+        }
+    }
+}
