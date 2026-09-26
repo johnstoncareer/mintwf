@@ -27,16 +27,16 @@
         <maven.compiler.release>25</maven.compiler.release>
         <maven.compiler.parameters>true</maven.compiler.parameters>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <spring-boot.version>4.1.1</spring-boot.version>
+        <junit.version>6.0.3</junit.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
-            <!-- Also manages JUnit, so every module tests on the same version. -->
+            <!-- Every module tests on the same JUnit version. -->
             <dependency>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-dependencies</artifactId>
-                <version>${spring-boot.version}</version>
+                <groupId>org.junit</groupId>
+                <artifactId>junit-bom</artifactId>
+                <version>${junit.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>

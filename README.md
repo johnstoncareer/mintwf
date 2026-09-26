@@ -62,6 +62,7 @@ mintwf has no REST API. The standard BPMN process commands are provided as [Clau
 | `correlate-message` | Deliver a message to the instance waiting for it |
 | `send-signal` | Broadcast a signal to every instance waiting for it |
 | `cancel-instance` | Cancel a running instance and run its compensation handlers |
+| `retry-incident` | Retry a failed step that has exhausted its automatic retries |
 
 ## Telecom Domain
 
@@ -108,6 +109,8 @@ This compiles every module, runs the tests, and writes jars to each module's `ta
 | `mintwf-core` | Engine core: workflow definitions, execution, and state |
 
 Java packages live under `com.intwfs.mintwf`.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the planned modules, runtime design, and delivery phases.
 
 ## Contributing
 
