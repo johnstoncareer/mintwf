@@ -12,8 +12,10 @@ import java.util.Map;
 import picocli.CommandLine;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.SerializationFeature;
 import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 /**
  * Writes command results and errors as JSON on standard output, which is what the skills read.
@@ -49,6 +51,15 @@ public final class JsonOutput {
         PrintWriter out = commandLine.getOut();
         out.println(JSON.writeValueAsString(result));
         out.flush();
+    }
+
+    /**
+     * Returns {@code value} as a JSON object with one more field.
+     */
+    public static JsonNode withField(Object value, String name, Object field) {
+        ObjectNode object = JSON.valueToTree(value);
+        object.set(name, JSON.valueToTree(field));
+        return object;
     }
 
     /**

@@ -84,6 +84,30 @@ class ProcessCommandsTest {
     }
 
     @Test
+    void shouldListVisitedNodesWithHistory() {
+        // given
+        run("deploy-process", bpmn.toString());
+        JsonNode started = run("start-process", "Approval").json();
+        String instanceId = started.get("id").asString();
+        run("complete-task", instanceId, started.get("tasks").get(0).get("id").asString(),
+                "--vars", "{\"approved\": false}");
+
+        // when
+        JsonNode shown = run("get-instance", instanceId, "--history").json();
+
+        // then
+        assertEquals("COMPLETED", shown.get("status").asString());
+        JsonNode history = shown.get("history");
+        List<String> visits = new ArrayList<>();
+        history.forEach(node -> visits.add(node.get("nodeId").asString() + ":" + node.get("state").asString()));
+        assertEquals(List.of("start:COMPLETED", "review:COMPLETED", "decision:COMPLETED", "rejectedEnd:COMPLETED"),
+                visits);
+        assertEquals("userTask", history.get(1).get("nodeType").asString());
+        assertTrue(history.get(1).get("endedAt").asString().endsWith("Z"), history.get(1).toString());
+        assertEquals(null, run("get-instance", instanceId).json().get("history"));
+    }
+
+    @Test
     void readsVariablesFromAFile() throws IOException {
         run("deploy-process", bpmn.toString());
         Path variables = directory.resolve("vars.json");

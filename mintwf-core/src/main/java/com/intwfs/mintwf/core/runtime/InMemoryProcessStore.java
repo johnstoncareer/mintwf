@@ -1,6 +1,7 @@
 package com.intwfs.mintwf.core.runtime;
 
 import com.intwfs.mintwf.core.api.InstanceQuery;
+import com.intwfs.mintwf.core.api.NodeInstance;
 import com.intwfs.mintwf.core.spi.DeploymentRecord;
 import com.intwfs.mintwf.core.spi.InstanceChange;
 import com.intwfs.mintwf.core.spi.InstanceState;
@@ -26,6 +27,8 @@ public final class InMemoryProcessStore implements ProcessStore {
     private final Map<String, TreeMap<Integer, DeploymentRecord>> deployments = new HashMap<>();
     private final Map<String, InstanceState> instances = new LinkedHashMap<>();
     private final Map<String, Job> jobs = new LinkedHashMap<>();
+    /** Insertion-ordered, and replacing an entry keeps its place, so iteration order is start order. */
+    private final Map<String, NodeInstance> nodeInstances = new LinkedHashMap<>();
 
     @Override
     public synchronized void insertDeployment(DeploymentRecord deployment) {
@@ -68,6 +71,7 @@ public final class InMemoryProcessStore implements ProcessStore {
         instances.put(state.id(), state);
         change.deletedJobIds().forEach(jobs::remove);
         change.createdJobs().forEach(job -> jobs.put(job.id(), job));
+        change.nodeInstances().forEach(node -> nodeInstances.put(node.id(), node));
     }
 
     @Override
@@ -80,6 +84,16 @@ public final class InMemoryProcessStore implements ProcessStore {
         return instances.values().stream()
                 .filter(instance -> query.matches(instance.processKey(), instance.status()))
                 .toList();
+    }
+
+    @Override
+    public synchronized List<NodeInstance> nodeInstances(String instanceId) {
+        return nodeInstances.values().stream().filter(node -> node.instanceId().equals(instanceId)).toList();
+    }
+
+    @Override
+    public synchronized List<NodeInstance> activeNodeInstances(String instanceId) {
+        return nodeInstances(instanceId).stream().filter(node -> node.state() == NodeInstance.State.ACTIVE).toList();
     }
 
     @Override

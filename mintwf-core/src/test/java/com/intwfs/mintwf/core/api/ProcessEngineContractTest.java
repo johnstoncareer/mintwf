@@ -12,6 +12,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.intwfs.mintwf.core.TestClock;
 import com.intwfs.mintwf.core.parser.BpmnParseException;
+import com.intwfs.mintwf.core.spi.Execution;
+import com.intwfs.mintwf.core.spi.InstanceChange;
+import com.intwfs.mintwf.core.spi.InstanceState;
 import com.intwfs.mintwf.core.spi.ProcessStore;
 import java.time.Duration;
 import java.time.Instant;
@@ -20,6 +23,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
@@ -482,10 +486,165 @@ public abstract class ProcessEngineContractTest {
         assertEquals("hello", discovering.instance(started.id()).variables().get("greeting"));
     }
 
+    @Test
+    public void shouldRecordEveryNodeVisitedInOrder() {
+        // given
+        engine.deploy(process("History", """
+                <startEvent id="start"/>
+                <serviceTask id="allocate" mintwf:type="record"/>
+                <exclusiveGateway id="route"/>
+                <serviceTask id="activate" mintwf:type="record" mintwf:async="false"/>
+                <endEvent id="end"/>
+                """ + flow("f1", "start", "allocate") + flow("f2", "allocate", "route")
+                + flow("f3", "route", "activate") + flow("f4", "activate", "end")));
+        ProcessInstance started = engine.start("History", Map.of());
+        assertEquals(List.of("start:COMPLETED", "allocate:ACTIVE"), visits(started.id()));
+
+        // when
+        clock.advance(Duration.ofSeconds(5));
+        runJobs();
+
+        // then
+        List<NodeInstance> history = engine.history(started.id());
+        assertEquals(List.of("start:COMPLETED", "allocate:COMPLETED", "route:COMPLETED", "activate:COMPLETED",
+                "end:COMPLETED"), visits(started.id()));
+        assertEquals(List.of("startEvent", "serviceTask", "exclusiveGateway", "serviceTask", "endEvent"),
+                history.stream().map(NodeInstance::nodeType).toList());
+        NodeInstance allocate = history.get(1);
+        assertEquals(started.id(), allocate.instanceId());
+        assertEquals(NOW, allocate.startedAt());
+        assertEquals(NOW.plusSeconds(5), allocate.endedAt());
+        assertEquals(1, history.stream().map(NodeInstance::executionId).distinct().count());
+    }
+
+    @Test
+    public void shouldKeepAWaitingTaskActiveUntilItIsCompleted() {
+        // given
+        deployWaiting("WaitHistory");
+        ProcessInstance started = engine.start("WaitHistory", Map.of());
+        NodeInstance waiting = engine.history(started.id()).get(1);
+        assertEquals(NodeInstance.State.ACTIVE, waiting.state());
+        assertNull(waiting.endedAt());
+        assertEquals(started.tasks().getFirst().id(), waiting.executionId());
+
+        // when
+        clock.advance(Duration.ofMinutes(1));
+        engine.completeTask(started.id(), started.tasks().getFirst().id(), Map.of());
+
+        // then
+        assertEquals(List.of("start:COMPLETED", "t:COMPLETED", "end:COMPLETED"), visits(started.id()));
+        assertEquals(NOW.plusSeconds(60), engine.history(started.id()).get(1).endedAt());
+    }
+
+    @Test
+    public void shouldRecordAJoiningGatewayOnceWhenItFires() {
+        // given
+        engine.deploy(process("JoinHistory", """
+                <startEvent id="start"/>
+                <parallelGateway id="fork"/>
+                <userTask id="network"/>
+                <userTask id="billing"/>
+                <parallelGateway id="join"/>
+                <endEvent id="end"/>
+                """ + flow("f1", "start", "fork") + flow("f2", "fork", "network") + flow("f3", "fork", "billing")
+                + flow("f4", "network", "join") + flow("f5", "billing", "join") + flow("f6", "join", "end")));
+        ProcessInstance started = engine.start("JoinHistory", Map.of());
+
+        // when
+        ProcessInstance oneDone = engine.completeTask(started.id(), started.tasks().get(1).id(), Map.of());
+        List<String> whileWaiting = visits(started.id());
+        engine.completeTask(started.id(), oneDone.tasks().getFirst().id(), Map.of());
+
+        // then
+        assertEquals(List.of("start:COMPLETED", "fork:COMPLETED", "network:ACTIVE", "billing:COMPLETED"),
+                whileWaiting);
+        assertEquals(List.of("start:COMPLETED", "fork:COMPLETED", "network:COMPLETED", "billing:COMPLETED",
+                "join:COMPLETED", "end:COMPLETED"), visits(started.id()));
+    }
+
+    @Test
+    public void shouldRecordEachVisitOfANodeInALoop() {
+        // given
+        engine.deploy(process("LoopHistory", """
+                <startEvent id="start"/>
+                <userTask id="review"/>
+                <exclusiveGateway id="check" default="done"/>
+                <endEvent id="end"/>
+                """ + flow("f1", "start", "review") + flow("f2", "review", "check")
+                + conditionalFlow("again", "check", "review", "rework == true") + flow("done", "check", "end")));
+        ProcessInstance started = engine.start("LoopHistory", Map.of());
+
+        // when
+        ProcessInstance second = engine.completeTask(started.id(), started.tasks().getFirst().id(),
+                Map.of("rework", true));
+        engine.completeTask(started.id(), second.tasks().getFirst().id(), Map.of("rework", false));
+
+        // then
+        assertEquals(List.of("start:COMPLETED", "review:COMPLETED", "check:COMPLETED", "review:COMPLETED",
+                "check:COMPLETED", "end:COMPLETED"), visits(started.id()));
+    }
+
+    @Test
+    public void shouldTerminateActiveNodesWhenCancelled() {
+        // given
+        deployWaiting("CancelHistory");
+        ProcessInstance started = engine.start("CancelHistory", Map.of());
+        clock.advance(Duration.ofSeconds(30));
+
+        // when
+        engine.cancel(started.id());
+
+        // then
+        assertEquals(List.of("start:COMPLETED", "t:TERMINATED"), visits(started.id()));
+        assertEquals(NOW.plusSeconds(30), engine.history(started.id()).get(1).endedAt());
+    }
+
+    @Test
+    public void shouldLeaveHistoryUnchangedWhenACommandFails() {
+        // given
+        engine.deploy(process("FailHistory", """
+                <startEvent id="start"/>
+                <userTask id="t"/>
+                <exclusiveGateway id="g"/>
+                <endEvent id="end"/>
+                """ + flow("f1", "start", "t") + flow("f2", "t", "g")
+                + conditionalFlow("ok", "g", "end", "x == 1")));
+        ProcessInstance started = engine.start("FailHistory", Map.of());
+
+        // when
+        assertThrows(ProcessExecutionException.class,
+                () -> engine.completeTask(started.id(), started.tasks().getFirst().id(), Map.of("x", 2)));
+
+        // then
+        assertEquals(List.of("start:COMPLETED", "t:ACTIVE"), visits(started.id()));
+        assertThrows(NotFoundException.class, () -> engine.history("nope"));
+    }
+
+    @Test
+    public void shouldContinueAnInstanceStartedBeforeHistoryWasRecorded() {
+        // given an instance saved without node instances, as stores held them before node history existed
+        deployWaiting("Legacy");
+        InstanceState legacy = new InstanceState(UUID.randomUUID().toString(), "Legacy", 1, null,
+                InstanceStatus.ACTIVE, Map.of(), List.of(new Execution("1", "t", "f1")), 2, NOW, null, 0);
+        store.save(InstanceChange.insert(legacy, List.of(), List.of()));
+
+        // when
+        ProcessInstance done = engine.completeTask(legacy.id(), "1", Map.of());
+
+        // then
+        assertEquals(InstanceStatus.COMPLETED, done.status());
+        assertEquals(List.of("end:COMPLETED"), visits(legacy.id()));
+    }
+
     protected void runJobs() {
         while (engine.executeDueJobs(10) > 0) {
             // Keep going until nothing is due.
         }
+    }
+
+    /** Returns the instance's history as {@code nodeId:STATE} entries, oldest first. */
+    private List<String> visits(String instanceId) {
+        return engine.history(instanceId).stream().map(node -> node.nodeId() + ":" + node.state()).toList();
     }
 
     private void deployWaiting(String key) {

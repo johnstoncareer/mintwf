@@ -55,8 +55,8 @@ All code lives under `com.intwfs.mintwf.core`.
 | `parser` | Parses XML into a DOM while validating it against the bundled OMG XSDs, then builds the model. Rejects unsupported elements with the offending element id. |
 | `expression` | `SimpleExpressionEvaluator`, the built-in condition language. |
 | `runtime` | `Interpreter` (the token interpreter), `InMemoryProcessStore`, and variable validation. Internal. |
-| `api` | `ProcessEngine` facade: `deploy`, `start`, `completeTask`, `cancel`, `retryIncident`, queries, and `executeDueJobs`, with `correlateMessage` and `sendSignal` to come. Maps one-to-one to the skills. |
-| `spi` | Extension points: `ProcessStore`, `TaskHandler`, `TaskHandlerProvider`, `ExpressionEvaluator`. Also the persisted records `InstanceState`, `Execution`, `Job`, and `DeploymentRecord`, and `InstanceChange`, the unit a store saves atomically. Time comes from an injectable `java.time.Clock`. |
+| `api` | `ProcessEngine` facade: `deploy`, `start`, `completeTask`, `cancel`, `retryIncident`, queries including `history`, and `executeDueJobs`, with `correlateMessage` and `sendSignal` to come. Maps one-to-one to the skills. |
+| `spi` | Extension points: `ProcessStore`, `TaskHandler`, `TaskHandlerProvider`, `ExpressionEvaluator`. Also the persisted records `InstanceState`, `Execution`, `Job`, and `DeploymentRecord`, and `InstanceChange`, the unit a store saves atomically, which includes the node instances a command started or ended. Time comes from an injectable `java.time.Clock`. |
 | `job` | `RetryPolicy` and `JobWorker`, the background loop that calls `executeDueJobs`. |
 
 ## CLI and skills
@@ -91,6 +91,16 @@ A command runs the instance synchronously until every token is at a wait state:
 - an async job (see below)
 
 The resulting state is then saved in one transaction. A failure before the save rolls the instance back to its previous wait state.
+
+### Node history
+
+Every visit of a token to a node is recorded as a **node instance** (`NodeInstance`), so an instance's history shows which nodes ran, in order, and when. See [ADR 0001](adr/0001-node-history-and-instance-viewer.md).
+
+- A node instance starts `ACTIVE` when a token arrives and becomes `COMPLETED` when it leaves. A token at a wait state keeps its node instance active until a later command moves it on. Cancelling marks active node instances `TERMINATED`.
+- A parallel gateway that joins gets one node instance, when it fires. Tokens waiting at the join have none.
+- A node visited twice, for example in a loop, has two node instances.
+- Each command loads the instance's active node instances with its state and saves the ones it started or ended in the same transaction, so a failed command leaves the history unchanged.
+- Instances started before node history existed have no entries for the nodes they had already left.
 
 ### Service tasks
 
@@ -141,7 +151,7 @@ Tables are prefixed `mintwf_`. When a store opens, numbered scripts in `mintwf-s
 | `mintwf_instance` | Id, process key and version, business key, status, timestamps, `doc` (JSON), `revision` | Done |
 | `mintwf_job` | Type, instance, execution, node, due time, retries left, last error, lock owner, lock expiry. Rows with zero retries are incidents. | Done |
 | `subscription` | Waiting message name, signal name, or timer due time, with the instance and execution. Used by `correlate-message`, `send-signal`, and the timer scan. | Phase 4 |
-| `history` | Append-only log of node entry and exit, for diagnosing fallout | Not scheduled yet |
+| `mintwf_node_instance` | One row per node visit: instance, execution, node id and type, state, start and end time. Only state and end time are ever updated. Ordered by `seq`. | Done |
 
 A worker claims a job with `UPDATE mintwf_job SET lock_owner = ?, lock_expiry = ? WHERE id = ? AND retries > 0 AND due_at <= ? AND (lock_owner IS NULL OR lock_expiry < ?)`. When two workers race for a job, only one update succeeds. An expired lock can be reclaimed, so a crashed worker's jobs are picked up again.
 
@@ -166,3 +176,4 @@ Each phase adds its supported elements to the BPMN subset documented in the READ
 | Dependency management | JUnit and Jackson BOMs plus explicitly pinned versions | The project no longer uses Spring, so it no longer imports the Spring Boot BOM. |
 | Incidents | A job with zero retries left, not a separate table | Retrying is one update, and a cancelled instance's incidents go with its jobs. |
 | BPMN parsing | DOM with schema validation during the parse | Process files are small. A DOM makes the subset checks simple, and validating while parsing needs only one pass. |
+| Node history | One node instance per visit, saved with the instance change ([ADR 0001](adr/0001-node-history-and-instance-viewer.md)) | Shows what ran. Considered instead: deriving it from jobs, which only async service tasks create and which are deleted when done. |

@@ -1,6 +1,7 @@
 package com.intwfs.mintwf.core.spi;
 
 import com.intwfs.mintwf.core.api.InstanceQuery;
+import com.intwfs.mintwf.core.api.NodeInstance;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -21,8 +22,8 @@ public interface ProcessStore {
     Optional<DeploymentRecord> deployment(String processKey, int version);
 
     /**
-     * Applies a change atomically: the instance insert or update, and the job inserts and deletes, all happen or none
-     * do.
+     * Applies a change atomically: the instance insert or update, the job inserts and deletes, and the node instance
+     * writes all happen or none do.
      *
      * @throws OptimisticLockException if an inserted instance already exists, or an updated one is missing or no
      *     longer at {@link InstanceChange#expectedRevision()}
@@ -35,6 +36,16 @@ public interface ProcessStore {
      * Returns the matching instances, oldest first.
      */
     List<InstanceState> instances(InstanceQuery query);
+
+    /**
+     * Returns an instance's node instances in the order they were started.
+     */
+    List<NodeInstance> nodeInstances(String instanceId);
+
+    /**
+     * Returns an instance's {@link NodeInstance.State#ACTIVE} node instances in the order they were started.
+     */
+    List<NodeInstance> activeNodeInstances(String instanceId);
 
     Optional<Job> job(String id);
 

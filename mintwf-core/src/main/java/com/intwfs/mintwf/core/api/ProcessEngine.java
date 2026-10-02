@@ -36,7 +36,7 @@ import java.util.Objects;
 import java.util.ServiceLoader;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.Function;
+import java.util.function.BiFunction;
 import java.util.function.Supplier;
 
 /**
@@ -129,7 +129,7 @@ public final class ProcessEngine {
         ExecutableProcess process = executable(deployment.processKey(), deployment.version());
         Interpreter.Result result =
                 interpreter.start(process, UUID.randomUUID().toString(), businessKey, variables);
-        store.save(InstanceChange.insert(result.state(), result.createdJobs()));
+        store.save(InstanceChange.insert(result.state(), result.createdJobs(), result.nodeInstances()));
         return view(result.state());
     }
 
@@ -142,24 +142,25 @@ public final class ProcessEngine {
      * @throws ProcessExecutionException if the instance is not active or fails while running on
      */
     public ProcessInstance completeTask(String instanceId, String taskId, Map<String, ?> variables) {
-        return update(instanceId, state -> {
+        return update(instanceId, (state, active) -> {
             ExecutableProcess process = executable(state.processKey(), state.processVersion());
-            Interpreter.Result result = interpreter.completeTask(process, state, taskId, variables);
-            return new InstanceChange(result.state(), state.revision(), result.createdJobs(), List.of());
+            Interpreter.Result result = interpreter.completeTask(process, state, active, taskId, variables);
+            return new InstanceChange(result.state(), state.revision(), result.createdJobs(), List.of(),
+                    result.nodeInstances());
         });
     }
 
     /**
-     * Cancels an active instance and deletes its jobs.
+     * Cancels an active instance, deletes its jobs, and terminates its active node instances.
      *
      * @throws NotFoundException if the instance does not exist
      * @throws ProcessExecutionException if the instance is not active
      */
     public ProcessInstance cancel(String instanceId) {
-        return update(instanceId, state -> {
-            InstanceState cancelled = interpreter.cancel(state);
+        return update(instanceId, (state, active) -> {
+            Interpreter.Result result = interpreter.cancel(state, active);
             List<String> jobIds = store.jobs(instanceId).stream().map(Job::id).toList();
-            return new InstanceChange(cancelled, state.revision(), List.of(), jobIds);
+            return new InstanceChange(result.state(), state.revision(), List.of(), jobIds, result.nodeInstances());
         });
     }
 
@@ -194,6 +195,29 @@ public final class ProcessEngine {
      */
     public List<ProcessInstance> instances(InstanceQuery query) {
         return store.instances(query).stream().map(this::view).toList();
+    }
+
+    /**
+     * Returns every node an instance's tokens have visited, in the order they arrived. Instances started before node
+     * history was recorded have no entries for the nodes they had already left.
+     *
+     * @throws NotFoundException if the instance does not exist
+     */
+    public List<NodeInstance> history(String instanceId) {
+        load(instanceId);
+        return store.nodeInstances(instanceId);
+    }
+
+    /**
+     * Returns the BPMN XML of a deployed process version, exactly as it was deployed.
+     *
+     * @throws NotFoundException if the process version is not deployed
+     */
+    public byte[] processXml(String processKey, int version) {
+        return store.deployment(processKey, version)
+                .orElseThrow(() -> new NotFoundException(
+                        "process '" + processKey + "' version " + version + " is not deployed"))
+                .xml();
     }
 
     /**
@@ -233,9 +257,10 @@ public final class ProcessEngine {
                     store.deleteJob(job.id());
                     return null;
                 }
-                Interpreter.Result result = interpreter.completeServiceTask(process, current, job, changes);
+                Interpreter.Result result = interpreter.completeServiceTask(process, current,
+                        store.activeNodeInstances(current.id()), job, changes);
                 store.save(new InstanceChange(result.state(), current.revision(), result.createdJobs(),
-                        List.of(job.id())));
+                        List.of(job.id()), result.nodeInstances()));
                 return null;
             });
         } catch (ProcessExecutionException e) {
@@ -250,9 +275,15 @@ public final class ProcessEngine {
         store.updateJob(failed, workerId);
     }
 
-    private ProcessInstance update(String instanceId, Function<InstanceState, InstanceChange> command) {
+    /**
+     * Runs a command against the instance and its active node instances, and saves the change. Both are read before
+     * the save, which fails if the instance's revision moved on in between, so neither can be stale.
+     */
+    private ProcessInstance update(String instanceId,
+                                   BiFunction<InstanceState, List<NodeInstance>, InstanceChange> command) {
         return withRetry(() -> {
-            InstanceChange change = command.apply(load(instanceId));
+            InstanceState state = load(instanceId);
+            InstanceChange change = command.apply(state, store.activeNodeInstances(instanceId));
             store.save(change);
             return view(change.state());
         });

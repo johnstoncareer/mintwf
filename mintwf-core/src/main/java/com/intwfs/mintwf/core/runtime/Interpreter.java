@@ -2,6 +2,7 @@ package com.intwfs.mintwf.core.runtime;
 
 import com.intwfs.mintwf.core.MintwfException;
 import com.intwfs.mintwf.core.api.InstanceStatus;
+import com.intwfs.mintwf.core.api.NodeInstance;
 import com.intwfs.mintwf.core.api.NotFoundException;
 import com.intwfs.mintwf.core.api.ProcessExecutionException;
 import com.intwfs.mintwf.core.job.RetryPolicy;
@@ -22,10 +23,12 @@ import com.intwfs.mintwf.core.spi.InstanceState;
 import com.intwfs.mintwf.core.spi.Job;
 import com.intwfs.mintwf.core.spi.TaskHandler;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -34,8 +37,12 @@ import java.util.UUID;
 /**
  * Moves tokens through a process until every token is at a wait state or has ended.
  *
- * <p>Each method takes an instance state and returns the next one, plus any jobs to create, without touching the
- * store. A failed command leaves nothing behind. The caller saves the result.
+ * <p>Each method takes an instance state and returns the next one, plus any jobs to create and the node instances it
+ * started or ended, without touching the store. A failed command leaves nothing behind. The caller saves the result.
+ *
+ * <p>A node instance starts when a token arrives at a node and ends when the token leaves it. Methods that continue an
+ * existing instance take its {@link NodeInstance.State#ACTIVE} node instances, of which each execution has at most
+ * one. A parallel gateway that joins starts its node instance when it fires, so tokens waiting there have none.
  */
 public final class Interpreter {
 
@@ -53,12 +60,14 @@ public final class Interpreter {
     }
 
     /**
-     * The outcome of a command: the instance's next state and the jobs it created.
+     * The outcome of a command: the instance's next state, the jobs it created, and the node instances it started or
+     * ended, in start order.
      */
-    public record Result(InstanceState state, List<Job> createdJobs) {
+    public record Result(InstanceState state, List<Job> createdJobs, List<NodeInstance> nodeInstances) {
 
         public Result {
             createdJobs = List.copyOf(createdJobs);
+            nodeInstances = List.copyOf(nodeInstances);
         }
     }
 
@@ -67,7 +76,8 @@ public final class Interpreter {
      */
     public Result start(ExecutableProcess process, String id, String businessKey, Map<String, ?> variables) {
         Run run = new Run(process, new InstanceState(id, process.key(), process.version(), businessKey,
-                InstanceStatus.ACTIVE, Variables.copyOf(variables), List.of(), 1, clock.instant(), null, 0));
+                InstanceStatus.ACTIVE, Variables.copyOf(variables), List.of(), 1, clock.instant(), null, 0),
+                List.of());
         StartEvent start = (StartEvent) process.definition().nodes().stream()
                 .filter(StartEvent.class::isInstance).findFirst().orElseThrow();
         Execution token = new Execution(run.newExecutionId(), start.id(), null);
@@ -82,10 +92,10 @@ public final class Interpreter {
      *
      * @throws NotFoundException if the instance has no open task with this id
      */
-    public Result completeTask(ExecutableProcess process, InstanceState state, String taskId,
-                               Map<String, ?> variables) {
+    public Result completeTask(ExecutableProcess process, InstanceState state, List<NodeInstance> active,
+                               String taskId, Map<String, ?> variables) {
         requireActive(state);
-        Run run = new Run(process, state);
+        Run run = new Run(process, state, active);
         Execution task = run.executions.get(taskId);
         FlowNode node = task == null ? null : process.definition().node(task.nodeId());
         if (!(node instanceof UserTask || node instanceof ReceiveTask)) {
@@ -124,13 +134,13 @@ public final class Interpreter {
      *
      * @throws ProcessExecutionException if the token is no longer waiting, or the instance fails while running on
      */
-    public Result completeServiceTask(ExecutableProcess process, InstanceState state, Job job,
-                                      Map<String, Object> changes) {
+    public Result completeServiceTask(ExecutableProcess process, InstanceState state, List<NodeInstance> active,
+                                      Job job, Map<String, Object> changes) {
         if (!isWaiting(state, job)) {
             throw new ProcessExecutionException("instance '" + state.id() + "' is no longer waiting on job '"
                     + job.id() + "'");
         }
-        Run run = new Run(process, state);
+        Run run = new Run(process, state, active);
         run.variables.putAll(changes);
         run.leave(run.executions.get(job.executionId()), process.definition().node(job.nodeId()));
         run.drain();
@@ -138,13 +148,19 @@ public final class Interpreter {
     }
 
     /**
-     * Ends an active instance and removes its tokens. The caller deletes the instance's jobs.
+     * Ends an active instance, removes its tokens, and terminates its active node instances. The caller deletes the
+     * instance's jobs.
      */
-    public InstanceState cancel(InstanceState state) {
+    public Result cancel(InstanceState state, List<NodeInstance> active) {
         requireActive(state);
-        return new InstanceState(state.id(), state.processKey(), state.processVersion(), state.businessKey(),
-                InstanceStatus.CANCELLED, state.variables(), List.of(), state.nextExecutionId(), state.startedAt(),
-                clock.instant(), state.revision() + 1);
+        Instant now = clock.instant();
+        InstanceState cancelled = new InstanceState(state.id(), state.processKey(), state.processVersion(),
+                state.businessKey(), InstanceStatus.CANCELLED, state.variables(), List.of(), state.nextExecutionId(),
+                state.startedAt(), now, state.revision() + 1);
+        List<NodeInstance> terminated = active.stream()
+                .map(node -> node.ended(NodeInstance.State.TERMINATED, now))
+                .toList();
+        return new Result(cancelled, List.of(), terminated);
     }
 
     private static void requireActive(InstanceState state) {
@@ -188,10 +204,14 @@ public final class Interpreter {
         private final Map<String, Execution> executions = new LinkedHashMap<>();
         private final Deque<Execution> queue = new ArrayDeque<>();
         private final List<Job> createdJobs = new ArrayList<>();
+        /** The node instance each token is on, by execution id. */
+        private final Map<String, NodeInstance> activeNodes = new HashMap<>();
+        /** Every node instance started or ended in this command, by id; new ones in start order. */
+        private final Map<String, NodeInstance> nodeInstances = new LinkedHashMap<>();
         private int nextExecutionId;
         private int steps;
 
-        Run(ExecutableProcess process, InstanceState state) {
+        Run(ExecutableProcess process, InstanceState state, List<NodeInstance> active) {
             this.process = process;
             this.definition = process.definition();
             this.original = state;
@@ -199,6 +219,9 @@ public final class Interpreter {
             this.nextExecutionId = state.nextExecutionId();
             for (Execution execution : state.executions()) {
                 executions.put(execution.id(), execution);
+            }
+            for (NodeInstance node : active) {
+                activeNodes.put(node.executionId(), node);
             }
         }
 
@@ -214,9 +237,15 @@ public final class Interpreter {
                 }
                 Execution token = queue.removeFirst();
                 FlowNode node = definition.node(token.nodeId());
+                if (!(node instanceof ParallelGateway)) {
+                    enter(token, node);
+                }
                 switch (node) {
                     case StartEvent _ -> leave(token, node);
-                    case EndEvent _ -> executions.remove(token.id());
+                    case EndEvent _ -> {
+                        exit(token);
+                        executions.remove(token.id());
+                    }
                     case ServiceTask task when task.async() -> createdJobs.add(newJob(token, task));
                     case ServiceTask task -> {
                         invoke(task, new HandlerContext(original, task, variables));
@@ -228,6 +257,22 @@ public final class Interpreter {
                     case ExclusiveGateway gateway -> take(token, List.of(chooseExclusive(gateway)));
                     case ParallelGateway gateway -> join(token, gateway);
                 }
+            }
+        }
+
+        private void enter(Execution token, FlowNode node) {
+            NodeInstance started = new NodeInstance(UUID.randomUUID().toString(), original.id(), token.id(),
+                    node.id(), elementName(node), NodeInstance.State.ACTIVE, clock.instant(), null);
+            activeNodes.put(token.id(), started);
+            nodeInstances.put(started.id(), started);
+        }
+
+        /** Completes the token's node instance. Tokens of instances started before node history have none. */
+        private void exit(Execution token) {
+            NodeInstance node = activeNodes.remove(token.id());
+            if (node != null) {
+                NodeInstance completed = node.ended(NodeInstance.State.COMPLETED, clock.instant());
+                nodeInstances.put(completed.id(), completed);
             }
         }
 
@@ -277,7 +322,9 @@ public final class Interpreter {
         private void join(Execution token, ParallelGateway gateway) {
             List<SequenceFlow> incoming = definition.incoming(gateway.id());
             Execution merged = token;
-            if (incoming.size() > 1) {
+            if (incoming.size() <= 1) {
+                enter(token, gateway);
+            } else {
                 Map<String, Execution> arrived = new LinkedHashMap<>();
                 for (Execution waiting : executions.values()) {
                     if (waiting.nodeId().equals(gateway.id())) {
@@ -289,12 +336,14 @@ public final class Interpreter {
                 }
                 arrived.values().forEach(waiting -> executions.remove(waiting.id()));
                 merged = new Execution(newExecutionId(), gateway.id(), null);
+                enter(merged, gateway);
             }
             take(merged, definition.outgoing(gateway.id()));
         }
 
         /** Moves the token along one flow, or replaces it with one new token per flow. */
         private void take(Execution token, List<SequenceFlow> flows) {
+            exit(token);
             if (flows.size() == 1) {
                 SequenceFlow flow = flows.getFirst();
                 Execution moved = new Execution(token.id(), flow.targetRef(), flow.id());
@@ -335,12 +384,17 @@ public final class Interpreter {
                     original.businessKey(), completed ? InstanceStatus.COMPLETED : InstanceStatus.ACTIVE, variables,
                     List.copyOf(executions.values()), nextExecutionId, original.startedAt(),
                     completed ? clock.instant() : null, original.revision() + 1);
-            return new Result(next, createdJobs);
+            return new Result(next, createdJobs, List.copyOf(nodeInstances.values()));
         }
     }
 
     private static String describe(FlowNode node) {
+        return elementName(node) + " '" + node.id() + "'";
+    }
+
+    /** Returns the node's BPMN element name, such as {@code serviceTask}. */
+    private static String elementName(FlowNode node) {
         String type = node.getClass().getSimpleName();
-        return Character.toLowerCase(type.charAt(0)) + type.substring(1) + " '" + node.id() + "'";
+        return Character.toLowerCase(type.charAt(0)) + type.substring(1);
     }
 }

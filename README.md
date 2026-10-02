@@ -110,7 +110,7 @@ Each skill runs the matching `bin/mintwf` command, which you can also run yourse
 | `deploy-process` | `bin/mintwf deploy-process FILE`: deploy a BPMN 2.0 file, creating a new version if the content changed |
 | `start-process` | `bin/mintwf start-process PROCESS [--business-key KEY] [--vars JSON]`: start an instance |
 | `list-instances` | `bin/mintwf list-instances [--process PROCESS] [--status STATUS]`: list instances |
-| `get-instance` | `bin/mintwf get-instance INSTANCE`: show an instance's status, position, tasks, incidents, and variables |
+| `get-instance` | `bin/mintwf get-instance INSTANCE [--history]`: show an instance's status, position, tasks, incidents, and variables. `--history` adds every node the instance visited, oldest first. |
 | `complete-task` | `bin/mintwf complete-task INSTANCE TASK [--vars JSON]`: complete a waiting `userTask` or `receiveTask` |
 | `retry-incident` | `bin/mintwf retry-incident INSTANCE JOB`: give a failed service task a fresh set of attempts |
 | `cancel-instance` | `bin/mintwf cancel-instance INSTANCE`: cancel a running instance |

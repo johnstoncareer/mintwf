@@ -8,16 +8,23 @@ import com.intwfs.mintwf.core.api.InstanceQuery;
 import com.intwfs.mintwf.core.api.InstanceStatus;
 import com.intwfs.mintwf.core.api.ProcessEngine;
 import com.intwfs.mintwf.core.api.ProcessInstance;
+import java.io.InputStream;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -47,6 +54,41 @@ class JdbcProcessStoreTest {
         assertEquals(new BigDecimal("49.90"), reloaded.variables().get("price"));
         assertEquals(InstanceStatus.COMPLETED,
                 second.completeTask(started.id(), reloaded.tasks().getFirst().id(), Map.of()).status());
+    }
+
+    @Test
+    void shouldUpgradeAVersionOneDatabaseAndKeepItsData() throws Exception {
+        // given a database at schema version 1 holding a deployment
+        JdbcDataSource dataSource = new JdbcDataSource();
+        dataSource.setURL("jdbc:h2:mem:" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1");
+        String v1;
+        try (InputStream in = SchemaMigrator.class.getResourceAsStream("schema/V1__create_tables.sql")) {
+            v1 = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
+            for (String sql : v1.replaceAll("(?m)^--.*$", "").split(";")) {
+                if (!sql.isBlank()) {
+                    statement.execute(sql);
+                }
+            }
+            statement.execute("CREATE TABLE mintwf_schema (version INT NOT NULL PRIMARY KEY, "
+                    + "applied_at TIMESTAMP(9) WITH TIME ZONE NOT NULL)");
+            statement.execute("INSERT INTO mintwf_schema VALUES (1, CURRENT_TIMESTAMP)");
+            statement.execute("INSERT INTO mintwf_deployment (process_key, version, name, hash, xml, deployed_at) "
+                    + "VALUES ('Waiting', 1, NULL, '" + "0".repeat(64) + "', X'00', CURRENT_TIMESTAMP)");
+        }
+
+        // when
+        JdbcProcessStore store = new JdbcProcessStore(dataSource);
+
+        // then
+        assertEquals(1, store.latestDeployment("Waiting").orElseThrow().version());
+        assertEquals(List.of(), store.nodeInstances("any"));
+        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement();
+             ResultSet result = statement.executeQuery("SELECT MAX(version) FROM mintwf_schema")) {
+            result.next();
+            assertEquals(2, result.getInt(1));
+        }
     }
 
     @Test
