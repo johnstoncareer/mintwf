@@ -114,6 +114,7 @@ Each skill runs the matching `bin/mintwf` command, which you can also run yourse
 | `complete-task` | `bin/mintwf complete-task INSTANCE TASK [--vars JSON]`: complete a waiting `userTask` or `receiveTask` |
 | `retry-incident` | `bin/mintwf retry-incident INSTANCE JOB`: give a failed service task a fresh set of attempts |
 | `cancel-instance` | `bin/mintwf cancel-instance INSTANCE`: cancel a running instance |
+| `view-instance` | `bin/mintwf view-instance INSTANCE [--output FILE]`: write an HTML page that draws the instance on its BPMN diagram, marking the nodes that ran, are active, or have an incident, with the full node history. Opening it needs network access to cdn.jsdelivr.net. |
 | `start-worker` | `bin/mintwf worker`: run service task jobs until stopped. Service tasks only progress while a worker runs. |
 | `correlate-message` | Not implemented yet: deliver a message to the instance waiting for it |
 | `send-signal` | Not implemented yet: broadcast a signal to every instance waiting for it |

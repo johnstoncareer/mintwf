@@ -41,7 +41,7 @@ All modules exist. Packages that later phases fill contain only a `package-info.
 |---|---|---|---|
 | `com.intwfs.mintwf.store.jdbc` | `mintwf-store-jdbc` | `JdbcProcessStore` and schema migrations | 2 (done) |
 | `com.intwfs.mintwf.handler.http` | `mintwf-handler-http` | `http` task handler | 2 (done) |
-| `com.intwfs.mintwf.cli` | `mintwf-cli` | `mintwf` entry point, engine configuration, JSON output and error mapping | 3 (done) |
+| `com.intwfs.mintwf.cli` | `mintwf-cli` | `mintwf` entry point, engine configuration, JSON output and error mapping, the instance view page | 3 (done) |
 | `com.intwfs.mintwf.cli.command` | `mintwf-cli` | One command per process command skill | 3 (done) |
 | `com.intwfs.mintwf.cli.worker` | `mintwf-cli` | `mintwf worker`: runs due jobs until stopped | 2 (done) |
 
@@ -65,6 +65,7 @@ Each skill in `.claude/skills/` runs one `bin/mintwf` subcommand with the same n
 
 - `bin/mintwf` runs `mintwf-cli/target/mintwf.jar`, a shaded jar with every module and dependency. It rebuilds the jar first when the jar is missing or older than any module source or POM. `bin/mintwf.cmd` does the same for cmd and PowerShell, but only builds when the jar is missing.
 - Commands print their result as indented JSON on standard output: a `DeployedProcess`, a `ProcessInstance`, or an array of them.
+- `view-instance` writes an HTML page, by default to `.mintwf/views/INSTANCE.html`, and prints its path. `InstanceViewPage` fills the template `instance-view.html` with the instance, its history, and the deployed BPMN XML as JSON, escaping `<` so instance data cannot end the script element it sits in. In the browser, bpmn-js draws the diagram and marks each node by its node instances; a definition without diagram information is laid out with bpmn-auto-layout. Both load from cdn.jsdelivr.net at pinned versions, so the jar ships no JavaScript.
 - A failed command prints `{"error": {"type": ..., "message": ...}}` and exits with 1. The type is derived from the exception: `not_found`, `invalid_bpmn`, `execution_failed`, `invalid_input`, `io_error`, or `internal_error`. Invalid arguments are reported by picocli on standard error with exit code 2.
 - Variables are passed as a JSON object with `--vars` or `--vars-file`.
 - The database is `--database PATH`, else `$MINTWF_DATABASE`, else `.mintwf/mintwf` under the current directory.
@@ -165,6 +166,8 @@ A worker claims a job with `UPDATE mintwf_job SET lock_owner = ?, lock_expiry = 
 | 4. Events | Message and signal catch events, intermediate and boundary timers, boundary error events |
 | 5. Structure | Compensation, `subProcess`, `callActivity` |
 
+Node history and the `view-instance` page were added outside these phases ([ADR 0001](adr/0001-node-history-and-instance-viewer.md)). The ADR also maps skills, agents, and sub-agents to BPMN for later work.
+
 Each phase adds its supported elements to the BPMN subset documented in the README.
 
 ## Decisions
@@ -177,3 +180,4 @@ Each phase adds its supported elements to the BPMN subset documented in the READ
 | Incidents | A job with zero retries left, not a separate table | Retrying is one update, and a cancelled instance's incidents go with its jobs. |
 | BPMN parsing | DOM with schema validation during the parse | Process files are small. A DOM makes the subset checks simple, and validating while parsing needs only one pass. |
 | Node history | One node instance per visit, saved with the instance change ([ADR 0001](adr/0001-node-history-and-instance-viewer.md)) | Shows what ran. Considered instead: deriving it from jobs, which only async service tasks create and which are deleted when done. |
+| Instance viewer | A generated HTML file using bpmn-js from a CDN | Keeps the "no server" constraint and the Java-only build. Considered instead: a local web server, which adds something to host and secure. |

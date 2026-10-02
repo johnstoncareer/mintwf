@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mintwf instance</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bpmn-js@18.31.0/dist/assets/diagram-js.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bpmn-js@18.31.0/dist/assets/bpmn-js.css">
+<style>
+  :root {
+    --bg: #f7f7f5;
+    --surface: #ffffff;
+    --text: #1d1d1b;
+    --muted: #66665f;
+    --line: #dcdcd6;
+    --completed: #2e7d32;
+    --completed-fill: #e8f3e9;
+    --active: #1f6fd1;
+    --active-fill: #e3eefb;
+    --incident: #c62828;
+    --incident-fill: #fbe7e7;
+    --terminated: #8a8a83;
+    --terminated-fill: #efefec;
+    --selected: #fff6d6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615;
+      --surface: #20201e;
+      --text: #ecece8;
+      --muted: #a3a39b;
+      --line: #3a3a36;
+      --selected: #3a3420;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header, main { max-width: 1200px; margin: 0 auto; padding: 0 16px; }
+  header { padding-top: 24px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 24px 0 8px; }
+  .summary { color: var(--muted); margin: 0; }
+  .summary strong { color: var(--text); font-weight: 600; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; list-style: none; padding: 0; margin: 12px 0 0; color: var(--muted); }
+  .legend span { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; border: 2px solid; }
+  .legend .completed { border-color: var(--completed); background: var(--completed-fill); }
+  .legend .active { border-color: var(--active); background: var(--active-fill); }
+  .legend .incident { border-color: var(--incident); background: var(--incident-fill); }
+  .legend .terminated { border-color: var(--terminated); background: var(--terminated-fill); }
+  /* The diagram keeps a light background in both themes: bpmn-js draws in black. */
+  #canvas { height: 60vh; min-height: 320px; margin-top: 16px; background: #ffffff; border: 1px solid var(--line); border-radius: 8px; }
+  #message { color: var(--incident); }
+  .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: 0; }
+  tr.selected td { background: var(--selected); }
+  .state { font-weight: 600; }
+  .state-ACTIVE { color: var(--active); }
+  .state-COMPLETED { color: var(--completed); }
+  .state-TERMINATED { color: var(--terminated); }
+  .empty { color: var(--muted); }
+  #incidents li { margin-bottom: 4px; }
+  #incidents code { color: var(--incident); white-space: pre-wrap; }
+  footer { max-width: 1200px; margin: 24px auto; padding: 0 16px; color: var(--muted); font-size: 12px; }
+
+  /* Diagram markers, applied by bpmn-js to the element's group. */
+  .djs-element.mintwf-completed .djs-visual > :nth-child(1) { stroke: var(--completed) !important; fill: var(--completed-fill) !important; stroke-width: 2px !important; }
+  .djs-element.mintwf-active .djs-visual > :nth-child(1) { stroke: var(--active) !important; fill: var(--active-fill) !important; stroke-width: 3px !important; }
+  .djs-element.mintwf-incident .djs-visual > :nth-child(1) { stroke: var(--incident) !important; fill: var(--incident-fill) !important; stroke-width: 3px !important; }
+  .djs-element.mintwf-terminated .djs-visual > :nth-child(1) { stroke: var(--terminated) !important; fill: var(--terminated-fill) !important; stroke-width: 2px !important; }
+  .mintwf-badge {
+    min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px;
+    font: 600 12px/20px system-ui, sans-serif; text-align: center; color: #ffffff; background: var(--completed);
+    pointer-events: none;
+  }
+  .mintwf-badge.active { background: var(--active); }
+  .mintwf-badge.incident { background: var(--incident); }
+  .mintwf-badge.terminated { background: var(--terminated); }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Process instance</h1>
+  <p class="summary" id="summary"></p>
+  <ul class="legend">
+    <li><span class="completed"></span>Completed</li>
+    <li><span class="active"></span>Active</li>
+    <li><span class="incident"></span>Incident</li>
+    <li><span class="terminated"></span>Terminated</li>
+    <li>Badge: times visited</li>
+  </ul>
+</header>
+<main>
+  <div id="canvas"></div>
+  <p id="message" hidden></p>
+  <section id="incidents-section" hidden>
+    <h2>Incidents</h2>
+    <ul id="incidents"></ul>
+  </section>
+  <h2>History</h2>
+  <p class="summary">Every node the instance visited, in the order the tokens arrived. Click a node on the diagram to highlight its rows.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>#</th><th>Node</th><th>Type</th><th>State</th><th>Started</th><th>Ended</th><th>Duration</th></tr></thead>
+      <tbody id="history"></tbody>
+    </table>
+  </div>
+</main>
+<footer id="generated"></footer>
+
+<script type="application/json" id="mintwf-data">__MINTWF_DATA__</script>
+<script src="https://cdn.jsdelivr.net/npm/bpmn-js@18.31.0/dist/bpmn-navigated-viewer.production.min.js"></script>
+<script type="module">
+const data = JSON.parse(document.getElementById('mintwf-data').textContent);
+const { instance, history } = data;
+
+const byNode = new Map();
+for (const visit of history) {
+  if (!byNode.has(visit.nodeId)) byNode.set(visit.nodeId, []);
+  byNode.get(visit.nodeId).push(visit);
+}
+const incidentNodes = new Set(instance.incidents.map(incident => incident.nodeId));
+// Tokens of instances started before node history have no ACTIVE entry, so the instance's active nodes count too.
+const activeNodes = new Set([
+  ...instance.activeNodeIds,
+  ...history.filter(visit => visit.state === 'ACTIVE').map(visit => visit.nodeId),
+]);
+
+function stateOf(nodeId) {
+  if (incidentNodes.has(nodeId)) return 'incident';
+  if (activeNodes.has(nodeId)) return 'active';
+  const visits = byNode.get(nodeId) || [];
+  if (visits.some(visit => visit.state === 'TERMINATED')) return 'terminated';
+  return visits.length > 0 ? 'completed' : null;
+}
+
+function text(tag, value, className) {
+  const element = document.createElement(tag);
+  element.textContent = value;
+  if (className) element.className = className;
+  return element;
+}
+
+function formatTime(iso) {
+  return iso ? new Date(iso).toLocaleString() : '';
+}
+
+function formatDuration(startedAt, endedAt) {
+  if (!endedAt) return '';
+  const ms = new Date(endedAt) - new Date(startedAt);
+  if (ms < 1000) return ms + ' ms';
+  const seconds = ms / 1000;
+  if (seconds < 60) return seconds.toFixed(1) + ' s';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + ' min ' + Math.round(seconds % 60) + ' s';
+  return Math.floor(minutes / 60) + ' h ' + (minutes % 60) + ' min';
+}
+
+function renderSummary() {
+  document.title = instance.processKey + ' · ' + instance.status + ' · mintwf';
+  document.getElementById('title').textContent = instance.processKey + ' v' + instance.processVersion;
+  const summary = document.getElementById('summary');
+  const parts = [
+    ['Status', instance.status],
+    ['Instance', instance.id],
+    ['Business key', instance.businessKey],
+    ['Started', formatTime(instance.startedAt)],
+    ['Ended', formatTime(instance.endedAt)],
+  ];
+  for (const [label, value] of parts) {
+    if (!value) continue;
+    if (summary.childNodes.length > 0) summary.append(' · ');
+    summary.append(label + ' ');
+    summary.append(text('strong', value));
+  }
+  document.getElementById('generated').textContent =
+    'Snapshot written by mintwf view-instance. Run it again to refresh.';
+}
+
+function renderIncidents() {
+  if (instance.incidents.length === 0) return;
+  document.getElementById('incidents-section').hidden = false;
+  const list = document.getElementById('incidents');
+  for (const incident of instance.incidents) {
+    const item = document.createElement('li');
+    item.append(text('strong', incident.nodeId), ' failed ' + formatTime(incident.failedAt) + ': ');
+    item.append(text('code', incident.error || ''));
+    list.append(item);
+  }
+}
+
+function renderHistory(names) {
+  const body = document.getElementById('history');
+  if (history.length === 0) {
+    const row = document.createElement('tr');
+    const cell = text('td', 'No node history. The instance was started before mintwf recorded it.', 'empty');
+    cell.colSpan = 7;
+    row.append(cell);
+    body.append(row);
+    return;
+  }
+  history.forEach((visit, index) => {
+    const row = document.createElement('tr');
+    row.dataset.node = visit.nodeId;
+    const name = names.get(visit.nodeId);
+    row.append(
+      text('td', String(index + 1)),
+      text('td', name ? name + ' (' + visit.nodeId + ')' : visit.nodeId),
+      text('td', visit.nodeType),
+      text('td', visit.state, 'state state-' + visit.state),
+      text('td', formatTime(visit.startedAt)),
+      text('td', formatTime(visit.endedAt)),
+      text('td', formatDuration(visit.startedAt, visit.endedAt)),
+    );
+    body.append(row);
+  });
+}
+
+function highlightRows(nodeId) {
+  for (const row of document.querySelectorAll('#history tr')) {
+    row.classList.toggle('selected', nodeId !== null && row.dataset.node === nodeId);
+  }
+}
+
+function showMessage(message) {
+  const element = document.getElementById('message');
+  element.textContent = message;
+  element.hidden = false;
+}
+
+const BPMN_MODEL = 'http://www.omg.org/spec/BPMN/20100524/MODEL';
+
+// bpmn-auto-layout follows a node's <incoming> and <outgoing> children, which BPMN makes optional. Without them every
+// node is laid out unconnected, one per row, so add them from the sequence flows.
+function withFlowReferences(xml) {
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  const byId = new Map([...doc.getElementsByTagNameNS(BPMN_MODEL, '*')]
+    .filter(element => element.id).map(element => [element.id, element]));
+  for (const flow of doc.getElementsByTagNameNS(BPMN_MODEL, 'sequenceFlow')) {
+    for (const [attribute, tag] of [['sourceRef', 'outgoing'], ['targetRef', 'incoming']]) {
+      const node = byId.get(flow.getAttribute(attribute));
+      if (!node || [...node.children].some(child => child.localName === tag && child.textContent.trim() === flow.id)) {
+        continue;
+      }
+      const reference = doc.createElementNS(BPMN_MODEL, tag);
+      reference.textContent = flow.id;
+      node.append(reference);
+    }
+  }
+  return new XMLSerializer().serializeToString(doc);
+}
+
+async function renderDiagram() {
+  let xml = data.bpmn;
+  if (!/BPMNDiagram/.test(xml)) {
+    // The definition has no diagram layout, so lay it out here.
+    const { layoutProcess } = await import('https://cdn.jsdelivr.net/npm/bpmn-auto-layout@1.3.0/+esm');
+    xml = await layoutProcess(withFlowReferences(xml));
+  }
+  const viewer = new BpmnJS({ container: '#canvas' });
+  await viewer.importXML(xml);
+  const canvas = viewer.get('canvas');
+  const overlays = viewer.get('overlays');
+  const registry = viewer.get('elementRegistry');
+  canvas.zoom('fit-viewport', 'auto');
+  // Fitting is flush with the edges, which clips the badges on the outermost nodes.
+  const box = canvas.viewbox();
+  const pad = Math.max(box.width, box.height) * 0.08;
+  canvas.viewbox({ x: box.x - pad, y: box.y - pad, width: box.width + 2 * pad, height: box.height + 2 * pad });
+
+  const names = new Map();
+  for (const element of registry.getAll()) {
+    if (element.businessObject && element.businessObject.name) {
+      names.set(element.id, element.businessObject.name);
+    }
+  }
+  const nodeIds = new Set([...byNode.keys(), ...activeNodes, ...incidentNodes]);
+  for (const nodeId of nodeIds) {
+    const element = registry.get(nodeId);
+    const state = stateOf(nodeId);
+    if (!element || !state) continue;
+    canvas.addMarker(nodeId, 'mintwf-' + state);
+    const visits = (byNode.get(nodeId) || []).length;
+    if (visits > 0) {
+      overlays.add(nodeId, {
+        position: { top: -10, right: 10 },
+        html: text('div', String(visits), 'mintwf-badge ' + state),
+      });
+    }
+  }
+  viewer.get('eventBus').on('element.click', event => {
+    highlightRows(byNode.has(event.element.id) ? event.element.id : null);
+  });
+  return names;
+}
+
+renderSummary();
+renderIncidents();
+let names = new Map();
+try {
+  if (typeof BpmnJS === 'undefined') {
+    throw new Error('bpmn-js did not load. The page needs network access to cdn.jsdelivr.net.');
+  }
+  names = await renderDiagram();
+} catch (error) {
+  showMessage('The diagram could not be drawn: ' + error.message);
+}
+renderHistory(names);
+</script>
+</body>
+</html>

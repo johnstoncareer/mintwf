@@ -1,6 +1,7 @@
 package com.intwfs.mintwf.cli;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -105,6 +106,40 @@ class ProcessCommandsTest {
         assertEquals("userTask", history.get(1).get("nodeType").asString());
         assertTrue(history.get(1).get("endedAt").asString().endsWith("Z"), history.get(1).toString());
         assertEquals(null, run("get-instance", instanceId).json().get("history"));
+    }
+
+    @Test
+    void shouldWriteAViewPageWithTheDiagramAndHistory() throws IOException {
+        // given an instance whose data contains a closing script tag
+        run("deploy-process", bpmn.toString());
+        String instanceId = run("start-process", "Approval", "--business-key", "</script><b>x</b>").json()
+                .get("id").asString();
+        Path page = directory.resolve("views").resolve("approval.html");
+
+        // when
+        Result viewed = run("view-instance", instanceId, "--output", page.toString());
+
+        // then
+        assertEquals(0, viewed.exitCode());
+        assertEquals(instanceId, viewed.json().get("instanceId").asString());
+        assertEquals(page.toAbsolutePath().toString(), viewed.json().get("file").asString());
+        String html = Files.readString(page);
+        assertFalse(html.contains("__MINTWF_DATA__"));
+        assertFalse(html.contains("</script><b>"), "instance data must not end its script element");
+        String data = html.substring(html.indexOf("id=\"mintwf-data\">") + "id=\"mintwf-data\">".length(),
+                html.indexOf("</script>", html.indexOf("id=\"mintwf-data\">")));
+        JsonNode embedded = JsonOutput.JSON.readTree(data);
+        assertEquals("</script><b>x</b>", embedded.get("instance").get("businessKey").asString());
+        assertEquals("review", embedded.get("history").get(1).get("nodeId").asString());
+        assertEquals("ACTIVE", embedded.get("history").get(1).get("state").asString());
+        assertEquals(APPROVAL, embedded.get("bpmn").asString());
+    }
+
+    @Test
+    void shouldReportAViewOfAMissingInstanceAsNotFound() {
+        assertError(run("view-instance", "missing", "--output", directory.resolve("x.html").toString()),
+                "not_found", "no instance 'missing'");
+        assertFalse(Files.exists(directory.resolve("x.html")));
     }
 
     @Test

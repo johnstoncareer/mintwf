@@ -13,6 +13,6 @@ public final class Commands {
     public static List<Object> all() {
         return List.of(new DeployProcessCommand(), new StartProcessCommand(), new ListInstancesCommand(),
                 new GetInstanceCommand(), new CompleteTaskCommand(), new RetryIncidentCommand(),
-                new CancelInstanceCommand());
+                new CancelInstanceCommand(), new ViewInstanceCommand());
     }
 }
