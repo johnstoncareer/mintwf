@@ -28,7 +28,8 @@ This document describes how mintwf is structured and why. It is the reference fo
 | `mintwf-core` | Model, parser, runtime, SPIs, in-memory store | JDK only |
 | `mintwf-store-jdbc` | JDBC `ProcessStore`, schema migrations | H2, Jackson (variable serialization) |
 | `mintwf-handler-http` | The `http` task handler, discovered through `TaskHandlerProvider` | core, Jackson |
-| `mintwf-cli` | CLI commands and the `worker` subcommand, packaged as a single executable jar | core, store-jdbc, handler-http, picocli, Jackson |
+| `mintwf-claude` | The `skill` task handler, discovered through `TaskHandlerProvider` | core, Anthropic Java SDK, Jackson |
+| `mintwf-cli` | CLI commands and the `worker` subcommand, packaged as a single executable jar | core, store-jdbc, handler-http, claude, picocli, Jackson |
 | `.claude/skills/*` | One `SKILL.md` per process command, each calling the CLI | none |
 
 The HTTP handler is its own module because it needs a JSON library, which core must not depend on. It is also the model for third-party handler jars.
@@ -41,6 +42,7 @@ All modules exist. Packages that later phases fill contain only a `package-info.
 |---|---|---|---|
 | `com.intwfs.mintwf.store.jdbc` | `mintwf-store-jdbc` | `JdbcProcessStore` and schema migrations | 2 (done) |
 | `com.intwfs.mintwf.handler.http` | `mintwf-handler-http` | `http` task handler | 2 (done) |
+| `com.intwfs.mintwf.claude` | `mintwf-claude` | `skill` task handler; one Claude request per task, with adaptive thinking and server-side fallback models ([ADR 0002](adr/0002-subprocesses-call-activities-and-agents.md)) | done |
 | `com.intwfs.mintwf.cli` | `mintwf-cli` | `mintwf` entry point, engine configuration, JSON output and error mapping, the instance view page | 3 (done) |
 | `com.intwfs.mintwf.cli.command` | `mintwf-cli` | One command per process command skill | 3 (done) |
 | `com.intwfs.mintwf.cli.worker` | `mintwf-cli` | `mintwf worker`: runs due jobs until stopped | 2 (done) |

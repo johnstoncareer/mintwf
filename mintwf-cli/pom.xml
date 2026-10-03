@@ -28,6 +28,10 @@
             <artifactId>mintwf-handler-http</artifactId>
         </dependency>
         <dependency>
+            <groupId>com.intwfs.mintwf</groupId>
+            <artifactId>mintwf-claude</artifactId>
+        </dependency>
+        <dependency>
             <groupId>info.picocli</groupId>
             <artifactId>picocli</artifactId>
         </dependency>

@@ -99,6 +99,30 @@ A response outside the 2xx range fails the attempt.
 
 Other handlers can ship in their own jar: implement `com.intwfs.mintwf.core.spi.TaskHandlerProvider` and list the class in `META-INF/services/com.intwfs.mintwf.core.spi.TaskHandlerProvider`.
 
+### Skill tasks
+
+A service task with `mintwf:type="skill"` runs a [Claude skill](https://docs.claude.com/en/docs/claude-code/skills) as a workflow step. It sends the skill's `SKILL.md` instructions and the task's input variables to Claude and stores the reply, parsed as JSON when the reply is a JSON object or array:
+
+```xml
+<serviceTask id="classify" name="Classify order" mintwf:type="skill">
+  <extensionElements>
+    <mintwf:field name="skill" value="classify-order"/>
+    <mintwf:field name="inputVariables" value="amount,customer"/>
+    <mintwf:field name="resultVariable" value="classification"/>
+  </extensionElements>
+</serviceTask>
+```
+
+| Field | Meaning |
+|---|---|
+| `skill` | Required. The skill's directory name. |
+| `skillsDirectory` | Where skills live. Defaults to `$MINTWF_SKILLS_DIR`, else `.claude/skills` under the working directory. |
+| `inputVariables` | Comma-separated variables to send. Without it, every variable is sent. |
+| `resultVariable` | Variable to store the reply in. Defaults to the task id followed by `Result`. |
+| `model` | The Claude model. Defaults to `$MINTWF_CLAUDE_MODEL`, else `claude-opus-5`. |
+
+The skill gets no tools: it cannot run commands or call systems, so it suits steps such as classifying, summarizing, or drafting. The worker needs Anthropic API credentials, usually `ANTHROPIC_API_KEY`. If Claude declines or the call fails, the task is retried and then becomes an incident like any other service task.
+
 ## Process Commands
 
 mintwf has no REST API. The standard BPMN process commands are provided as [Claude skills](https://docs.claude.com/en/docs/claude-code/skills) instead, so processes are deployed, started, and managed by asking Claude in this repository, for example "deploy provision.bpmn and start it for order 42". The skills live in [.claude/skills/](.claude/skills/).
@@ -179,6 +203,7 @@ bin/mintwf list-instances --status ACTIVE
 | `mintwf-core` | Engine core: BPMN parser, model, interpreter, and extension points. No runtime dependencies. |
 | `mintwf-store-jdbc` | Stores deployments, instances, and jobs in a database, H2 by default. |
 | `mintwf-handler-http` | The `http` task handler. |
+| `mintwf-claude` | The `skill` task handler, which calls Claude. |
 | `mintwf-cli` | The `mintwf` command line and worker, packaged as `mintwf.jar`. |
 
 Java packages live under `com.intwfs.mintwf`.
