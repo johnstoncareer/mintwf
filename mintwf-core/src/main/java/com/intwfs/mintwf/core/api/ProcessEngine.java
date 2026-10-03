@@ -12,6 +12,7 @@ import com.intwfs.mintwf.core.parser.BpmnParser;
 import com.intwfs.mintwf.core.runtime.ExecutableProcess;
 import com.intwfs.mintwf.core.runtime.InMemoryProcessStore;
 import com.intwfs.mintwf.core.runtime.Interpreter;
+import com.intwfs.mintwf.core.spi.CallerLink;
 import com.intwfs.mintwf.core.spi.DeploymentRecord;
 import com.intwfs.mintwf.core.spi.Execution;
 import com.intwfs.mintwf.core.spi.ExpressionEvaluator;
@@ -30,13 +31,13 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.ServiceLoader;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.BiFunction;
 import java.util.function.Supplier;
 
 /**
@@ -59,6 +60,12 @@ public final class ProcessEngine {
 
     /** How many times a command is retried after losing a race with a concurrent write. */
     private static final int MAX_ATTEMPTS = 3;
+
+    /** How deep call activities may nest, which stops a process that calls itself without end. */
+    static final int MAX_CALL_DEPTH = 64;
+
+    /** How many interpreter runs one command may make across instances, which stops call loops without a wait. */
+    static final int MAX_RUNS_PER_COMMAND = 1_000;
 
     private final ProcessStore store;
     private final ExpressionEvaluator evaluator;
@@ -127,10 +134,12 @@ public final class ProcessEngine {
         DeploymentRecord deployment = store.latestDeployment(processKey)
                 .orElseThrow(() -> new NotFoundException("no process '" + processKey + "' is deployed"));
         ExecutableProcess process = executable(deployment.processKey(), deployment.version());
-        Interpreter.Result result =
-                interpreter.start(process, UUID.randomUUID().toString(), businessKey, variables);
-        store.save(InstanceChange.insert(result.state(), result.createdJobs(), result.nodeInstances()));
-        return view(result.state());
+        String id = UUID.randomUUID().toString();
+        Batch batch = new Batch();
+        Pending started = batch.create(id);
+        batch.settle(started, interpreter.start(process, id, businessKey, variables), 0);
+        batch.save();
+        return view(started.state);
     }
 
     /**
@@ -142,26 +151,49 @@ public final class ProcessEngine {
      * @throws ProcessExecutionException if the instance is not active or fails while running on
      */
     public ProcessInstance completeTask(String instanceId, String taskId, Map<String, ?> variables) {
-        return update(instanceId, (state, active) -> {
-            ExecutableProcess process = executable(state.processKey(), state.processVersion());
-            Interpreter.Result result = interpreter.completeTask(process, state, active, taskId, variables);
-            return new InstanceChange(result.state(), state.revision(), result.createdJobs(), List.of(),
-                    result.nodeInstances());
+        return withRetry(() -> {
+            Batch batch = new Batch();
+            Pending instance = batch.load(instanceId);
+            ExecutableProcess process = executable(instance.state.processKey(), instance.state.processVersion());
+            batch.settle(instance,
+                    interpreter.completeTask(process, instance.state, instance.active(), taskId, variables), 0);
+            batch.save();
+            return view(instance.state);
         });
     }
 
     /**
-     * Cancels an active instance, deletes its jobs, and terminates its active node instances.
+     * Cancels an active instance, deletes its jobs, and terminates its active node instances. Instances its call
+     * activities started are cancelled with it.
      *
      * @throws NotFoundException if the instance does not exist
-     * @throws ProcessExecutionException if the instance is not active
+     * @throws ProcessExecutionException if the instance is not active, or a call activity started it: its caller would
+     *     wait forever, so cancel the root of the call tree instead
      */
     public ProcessInstance cancel(String instanceId) {
-        return update(instanceId, (state, active) -> {
-            Interpreter.Result result = interpreter.cancel(state, active);
-            List<String> jobIds = store.jobs(instanceId).stream().map(Job::id).toList();
-            return new InstanceChange(result.state(), state.revision(), List.of(), jobIds, result.nodeInstances());
+        return withRetry(() -> {
+            Batch batch = new Batch();
+            Pending instance = batch.load(instanceId);
+            CallerLink caller = instance.state.caller();
+            if (caller != null && instance.state.status() == InstanceStatus.ACTIVE) {
+                throw new ProcessExecutionException("instance '" + instanceId + "' was started by callActivity '"
+                        + caller.nodeId() + "' of instance '" + caller.instanceId() + "'; cancel instance '"
+                        + caller.rootInstanceId() + "' instead");
+            }
+            cancelTree(batch, instance);
+            batch.save();
+            return view(instance.state);
         });
+    }
+
+    private void cancelTree(Batch batch, Pending instance) {
+        instance.apply(interpreter.cancel(instance.state, instance.active()));
+        store.jobs(instance.state.id()).forEach(job -> instance.deletedJobIds.add(job.id()));
+        for (InstanceState child : store.childInstances(instance.state.id())) {
+            if (child.status() == InstanceStatus.ACTIVE) {
+                cancelTree(batch, batch.load(child.id()));
+            }
+        }
     }
 
     /**
@@ -209,6 +241,16 @@ public final class ProcessEngine {
     }
 
     /**
+     * Returns the instances that the instance's call activities started, oldest first.
+     *
+     * @throws NotFoundException if the instance does not exist
+     */
+    public List<ProcessInstance> children(String instanceId) {
+        load(instanceId);
+        return store.childInstances(instanceId).stream().map(this::view).toList();
+    }
+
+    /**
      * Returns the BPMN XML of a deployed process version, exactly as it was deployed.
      *
      * @throws NotFoundException if the process version is not deployed
@@ -252,15 +294,16 @@ public final class ProcessEngine {
         }
         try {
             withRetry(() -> {
-                InstanceState current = load(job.instanceId());
-                if (!interpreter.isWaiting(current, job)) {
+                Batch batch = new Batch();
+                Pending instance = batch.load(job.instanceId());
+                if (!interpreter.isWaiting(instance.state, job)) {
                     store.deleteJob(job.id());
                     return null;
                 }
-                Interpreter.Result result = interpreter.completeServiceTask(process, current,
-                        store.activeNodeInstances(current.id()), job, changes);
-                store.save(new InstanceChange(result.state(), current.revision(), result.createdJobs(),
-                        List.of(job.id()), result.nodeInstances()));
+                instance.deletedJobIds.add(job.id());
+                batch.settle(instance,
+                        interpreter.completeServiceTask(process, instance.state, instance.active(), job, changes), 0);
+                batch.save();
                 return null;
             });
         } catch (ProcessExecutionException e) {
@@ -273,20 +316,6 @@ public final class ProcessEngine {
         int failedAttempts = retryPolicy.attempts() - job.retries() + 1;
         Job failed = job.failed(error.getMessage(), now, now.plus(retryPolicy.backoff(failedAttempts)));
         store.updateJob(failed, workerId);
-    }
-
-    /**
-     * Runs a command against the instance and its active node instances, and saves the change. Both are read before
-     * the save, which fails if the instance's revision moved on in between, so neither can be stale.
-     */
-    private ProcessInstance update(String instanceId,
-                                   BiFunction<InstanceState, List<NodeInstance>, InstanceChange> command) {
-        return withRetry(() -> {
-            InstanceState state = load(instanceId);
-            InstanceChange change = command.apply(state, store.activeNodeInstances(instanceId));
-            store.save(change);
-            return view(change.state());
-        });
     }
 
     private InstanceState load(String instanceId) {
@@ -320,9 +349,130 @@ public final class ProcessEngine {
                 .filter(Job::isIncident)
                 .map(job -> new Incident(job.id(), job.nodeId(), job.lastError(), job.failedAt()))
                 .toList();
+        CallerLink caller = state.caller();
         return new ProcessInstance(state.id(), state.processKey(), state.processVersion(), state.businessKey(),
                 state.status(), state.variables(), List.copyOf(active), List.copyOf(tasks), incidents,
-                state.startedAt(), state.endedAt());
+                state.startedAt(), state.endedAt(), caller == null ? null : caller.instanceId(),
+                caller == null ? null : caller.nodeId(), state.rootInstanceId());
+    }
+
+    /**
+     * The instances one command changes, saved together in one transaction. A command changes more than one instance
+     * when its tokens reach call activities, which start instances, or when it completes a called instance, which
+     * resumes the caller. Each instance is read once, with its active node instances, and the save checks every
+     * instance's revision, so none of the reads can be stale.
+     */
+    private final class Batch {
+
+        private final Map<String, Pending> instances = new LinkedHashMap<>();
+        private int runs;
+
+        Pending load(String instanceId) {
+            Pending loaded = instances.get(instanceId);
+            if (loaded == null) {
+                InstanceState state = ProcessEngine.this.load(instanceId);
+                loaded = new Pending(state, state.revision(), store.activeNodeInstances(instanceId));
+                instances.put(instanceId, loaded);
+            }
+            return loaded;
+        }
+
+        Pending create(String instanceId) {
+            Pending created = new Pending(null, null, List.of());
+            instances.put(instanceId, created);
+            return created;
+        }
+
+        /**
+         * Applies an interpreter result, starts the instances its call activities call, and resumes the caller of an
+         * instance that completed.
+         */
+        void settle(Pending instance, Interpreter.Result result, int depth) {
+            if (++runs > MAX_RUNS_PER_COMMAND) {
+                throw new ProcessExecutionException("one command ran instances more than " + MAX_RUNS_PER_COMMAND
+                        + " times; check for a callActivity loop without a wait state");
+            }
+            instance.apply(result);
+            for (Interpreter.Call call : result.calls()) {
+                startCalled(instance, call, depth + 1);
+            }
+            InstanceState state = instance.state;
+            if (state.status() == InstanceStatus.COMPLETED && state.caller() != null && !instance.callerResumed) {
+                instance.callerResumed = true;
+                resumeCaller(state, depth);
+            }
+        }
+
+        private void startCalled(Pending caller, Interpreter.Call call, int depth) {
+            if (depth > MAX_CALL_DEPTH) {
+                throw new ProcessExecutionException("callActivity '" + call.nodeId() + "': call activities are nested "
+                        + "more than " + MAX_CALL_DEPTH + " deep; check for a process that calls itself");
+            }
+            DeploymentRecord deployment = store.latestDeployment(call.calledElement())
+                    .orElseThrow(() -> new ProcessExecutionException("callActivity '" + call.nodeId()
+                            + "': no process '" + call.calledElement() + "' is deployed"));
+            ExecutableProcess process = executable(deployment.processKey(), deployment.version());
+            InstanceState callerState = caller.state;
+            String id = UUID.randomUUID().toString();
+            CallerLink link = new CallerLink(callerState.id(), call.executionId(), call.nodeId(),
+                    callerState.rootInstanceId());
+            Pending called = create(id);
+            settle(called, interpreter.start(process, id, callerState.businessKey(), callerState.variables(), link),
+                    depth);
+        }
+
+        private void resumeCaller(InstanceState called, int depth) {
+            CallerLink link = called.caller();
+            Pending caller = load(link.instanceId());
+            boolean waiting = caller.state.status() == InstanceStatus.ACTIVE && caller.state.executions().stream()
+                    .anyMatch(e -> e.id().equals(link.executionId()) && e.nodeId().equals(link.nodeId()));
+            if (!waiting) {
+                return;
+            }
+            ExecutableProcess process = executable(caller.state.processKey(), caller.state.processVersion());
+            settle(caller, interpreter.completeCallActivity(process, caller.state, caller.active(),
+                    link.executionId(), called.variables()), Math.max(0, depth - 1));
+        }
+
+        void save() {
+            store.saveAll(instances.values().stream().map(Pending::change).toList());
+        }
+    }
+
+    /** One instance's state within a {@link Batch}, and what the command writes for it. */
+    private static final class Pending {
+
+        private InstanceState state;
+        private final Long expectedRevision;
+        private final Map<String, NodeInstance> storedActive = new LinkedHashMap<>();
+        private final Map<String, NodeInstance> written = new LinkedHashMap<>();
+        private final List<Job> createdJobs = new ArrayList<>();
+        private final List<String> deletedJobIds = new ArrayList<>();
+        private boolean callerResumed;
+
+        Pending(InstanceState state, Long expectedRevision, List<NodeInstance> active) {
+            this.state = state;
+            this.expectedRevision = expectedRevision;
+            active.forEach(node -> storedActive.put(node.id(), node));
+        }
+
+        /** Returns the active node instances as stored, updated by what this command has written so far. */
+        List<NodeInstance> active() {
+            Map<String, NodeInstance> merged = new LinkedHashMap<>(storedActive);
+            merged.putAll(written);
+            return merged.values().stream().filter(node -> node.state() == NodeInstance.State.ACTIVE).toList();
+        }
+
+        void apply(Interpreter.Result result) {
+            state = result.state();
+            createdJobs.addAll(result.createdJobs());
+            result.nodeInstances().forEach(node -> written.put(node.id(), node));
+        }
+
+        InstanceChange change() {
+            return new InstanceChange(state, expectedRevision, createdJobs, deletedJobIds,
+                    List.copyOf(written.values()));
+        }
     }
 
     private static <T> T withRetry(Supplier<T> command) {

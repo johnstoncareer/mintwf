@@ -46,6 +46,7 @@
   h2 { font-size: 15px; margin: 24px 0 8px; }
   .summary { color: var(--muted); margin: 0; }
   .summary strong { color: var(--text); font-weight: 600; }
+  a { color: var(--active); }
   .legend { display: flex; flex-wrap: wrap; gap: 16px; list-style: none; padding: 0; margin: 12px 0 0; color: var(--muted); }
   .legend span { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; border: 2px solid; }
   .legend .completed { border-color: var(--completed); background: var(--completed-fill); }
@@ -89,6 +90,7 @@
 <header>
   <h1 id="title">Process instance</h1>
   <p class="summary" id="summary"></p>
+  <p class="summary" id="lineage" hidden></p>
   <ul class="legend">
     <li><span class="completed"></span>Completed</li>
     <li><span class="active"></span>Active</li>
@@ -100,6 +102,16 @@
 <main>
   <div id="canvas"></div>
   <p id="message" hidden></p>
+  <section id="children-section" hidden>
+    <h2>Called instances</h2>
+    <p class="summary">Instances started by call activities. Click a call activity on the diagram to open the instance it started.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Call activity</th><th>Instance</th><th>Process</th><th>Status</th></tr></thead>
+        <tbody id="children"></tbody>
+      </table>
+    </div>
+  </section>
   <section id="incidents-section" hidden>
     <h2>Incidents</h2>
     <ul id="incidents"></ul>
@@ -119,7 +131,7 @@
 <script src="https://cdn.jsdelivr.net/npm/bpmn-js@18.31.0/dist/bpmn-navigated-viewer.production.min.js"></script>
 <script type="module">
 const data = JSON.parse(document.getElementById('mintwf-data').textContent);
-const { instance, history } = data;
+const { instance, history, children } = data;
 
 const byNode = new Map();
 for (const visit of history) {
@@ -184,6 +196,40 @@ function renderSummary() {
     'Snapshot written by mintwf view-instance. Run it again to refresh.';
 }
 
+function link(href, label) {
+  const anchor = text('a', label);
+  anchor.href = href;
+  return anchor;
+}
+
+function renderLineage() {
+  if (!data.parentFile) return;
+  const lineage = document.getElementById('lineage');
+  lineage.hidden = false;
+  lineage.append('Called by ', link(data.parentFile, instance.parentInstanceId), ' from call activity ',
+    text('strong', instance.parentNodeId));
+}
+
+function renderChildren(names) {
+  if (children.length === 0) return;
+  document.getElementById('children-section').hidden = false;
+  const body = document.getElementById('children');
+  for (const child of children) {
+    const row = document.createElement('tr');
+    row.dataset.node = child.parentNodeId;
+    const name = names.get(child.parentNodeId);
+    const linkCell = document.createElement('td');
+    linkCell.append(link(child.file, child.id));
+    row.append(
+      text('td', name ? name + ' (' + child.parentNodeId + ')' : child.parentNodeId),
+      linkCell,
+      text('td', child.processKey),
+      text('td', child.status, 'state state-' + (child.status === 'ACTIVE' ? 'ACTIVE' : 'COMPLETED')),
+    );
+    body.append(row);
+  }
+}
+
 function renderIncidents() {
   if (instance.incidents.length === 0) return;
   document.getElementById('incidents-section').hidden = false;
@@ -224,7 +270,7 @@ function renderHistory(names) {
 }
 
 function highlightRows(nodeId) {
-  for (const row of document.querySelectorAll('#history tr')) {
+  for (const row of document.querySelectorAll('#history tr, #children tr')) {
     row.classList.toggle('selected', nodeId !== null && row.dataset.node === nodeId);
   }
 }
@@ -296,12 +342,18 @@ async function renderDiagram() {
     }
   }
   viewer.get('eventBus').on('element.click', event => {
+    const called = children.filter(child => child.parentNodeId === event.element.id);
+    if (called.length === 1) {
+      window.location.href = called[0].file;
+      return;
+    }
     highlightRows(byNode.has(event.element.id) ? event.element.id : null);
   });
   return names;
 }
 
 renderSummary();
+renderLineage();
 renderIncidents();
 let names = new Map();
 try {
@@ -312,6 +364,7 @@ try {
 } catch (error) {
   showMessage('The diagram could not be drawn: ' + error.message);
 }
+renderChildren(names);
 renderHistory(names);
 </script>
 </body>

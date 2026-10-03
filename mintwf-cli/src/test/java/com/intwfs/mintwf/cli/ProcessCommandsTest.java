@@ -114,21 +114,20 @@ class ProcessCommandsTest {
         run("deploy-process", bpmn.toString());
         String instanceId = run("start-process", "Approval", "--business-key", "</script><b>x</b>").json()
                 .get("id").asString();
-        Path page = directory.resolve("views").resolve("approval.html");
+        Path views = directory.resolve("views");
 
         // when
-        Result viewed = run("view-instance", instanceId, "--output", page.toString());
+        Result viewed = run("view-instance", instanceId, "--directory", views.toString());
 
         // then
         assertEquals(0, viewed.exitCode());
         assertEquals(instanceId, viewed.json().get("instanceId").asString());
-        assertEquals(page.toAbsolutePath().toString(), viewed.json().get("file").asString());
+        Path page = views.resolve(instanceId + ".html").toAbsolutePath();
+        assertEquals(page.toString(), viewed.json().get("file").asString());
         String html = Files.readString(page);
         assertFalse(html.contains("__MINTWF_DATA__"));
         assertFalse(html.contains("</script><b>"), "instance data must not end its script element");
-        String data = html.substring(html.indexOf("id=\"mintwf-data\">") + "id=\"mintwf-data\">".length(),
-                html.indexOf("</script>", html.indexOf("id=\"mintwf-data\">")));
-        JsonNode embedded = JsonOutput.JSON.readTree(data);
+        JsonNode embedded = embeddedData(html);
         assertEquals("</script><b>x</b>", embedded.get("instance").get("businessKey").asString());
         assertEquals("review", embedded.get("history").get(1).get("nodeId").asString());
         assertEquals("ACTIVE", embedded.get("history").get(1).get("state").asString());
@@ -137,9 +136,56 @@ class ProcessCommandsTest {
 
     @Test
     void shouldReportAViewOfAMissingInstanceAsNotFound() {
-        assertError(run("view-instance", "missing", "--output", directory.resolve("x.html").toString()),
+        assertError(run("view-instance", "missing", "--directory", directory.resolve("x").toString()),
                 "not_found", "no instance 'missing'");
-        assertFalse(Files.exists(directory.resolve("x.html")));
+        assertFalse(Files.exists(directory.resolve("x")));
+    }
+
+    @Test
+    void shouldWriteLinkedPagesForEveryInstanceInACallTree() throws IOException {
+        // given an order that calls the approval process
+        run("deploy-process", bpmn.toString());
+        Path order = directory.resolve("order.bpmn");
+        Files.writeString(order, """
+                <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                             targetNamespace="https://intwfs.com/test">
+                  <process id="Order" isExecutable="true">
+                    <startEvent id="start"/>
+                    <callActivity id="approve" calledElement="Approval"/>
+                    <endEvent id="end"/>
+                    <sequenceFlow id="f1" sourceRef="start" targetRef="approve"/>
+                    <sequenceFlow id="f2" sourceRef="approve" targetRef="end"/>
+                  </process>
+                </definitions>
+                """);
+        run("deploy-process", order.toString());
+        String orderId = run("start-process", "Order").json().get("id").asString();
+        JsonNode list = run("list-instances", "--process", "Approval").json();
+        String approvalId = list.get(0).get("id").asString();
+        assertEquals(orderId, list.get(0).get("parentInstanceId").asString());
+        Path views = directory.resolve("tree");
+
+        // when the called instance is viewed
+        Result viewed = run("view-instance", approvalId, "--directory", views.toString());
+
+        // then both pages are written, root first, and link to each other
+        assertEquals(0, viewed.exitCode());
+        assertEquals(views.resolve(approvalId + ".html").toAbsolutePath().toString(),
+                viewed.json().get("file").asString());
+        assertEquals(2, viewed.json().get("files").size());
+        assertEquals(views.resolve(orderId + ".html").toAbsolutePath().toString(),
+                viewed.json().get("files").get(0).asString());
+        JsonNode root = embeddedData(Files.readString(views.resolve(orderId + ".html")));
+        assertEquals(approvalId, root.get("children").get(0).get("id").asString());
+        assertEquals("approve", root.get("children").get(0).get("parentNodeId").asString());
+        assertEquals(approvalId + ".html", root.get("children").get(0).get("file").asString());
+        JsonNode child = embeddedData(Files.readString(views.resolve(approvalId + ".html")));
+        assertEquals(orderId + ".html", child.get("parentFile").asString());
+    }
+
+    private static JsonNode embeddedData(String html) {
+        int start = html.indexOf("id=\"mintwf-data\">") + "id=\"mintwf-data\">".length();
+        return JsonOutput.JSON.readTree(html.substring(start, html.indexOf("</script>", start)));
     }
 
     @Test

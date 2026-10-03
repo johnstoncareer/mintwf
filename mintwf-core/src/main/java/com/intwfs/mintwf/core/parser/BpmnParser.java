@@ -1,5 +1,6 @@
 package com.intwfs.mintwf.core.parser;
 
+import com.intwfs.mintwf.core.model.CallActivity;
 import com.intwfs.mintwf.core.model.EndEvent;
 import com.intwfs.mintwf.core.model.ExclusiveGateway;
 import com.intwfs.mintwf.core.model.FlowNode;
@@ -9,6 +10,7 @@ import com.intwfs.mintwf.core.model.ReceiveTask;
 import com.intwfs.mintwf.core.model.SequenceFlow;
 import com.intwfs.mintwf.core.model.ServiceTask;
 import com.intwfs.mintwf.core.model.StartEvent;
+import com.intwfs.mintwf.core.model.SubProcess;
 import com.intwfs.mintwf.core.model.UserTask;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -56,7 +58,7 @@ public final class BpmnParser {
     private static final Set<String> IGNORED_IN_NODE = Set.of("documentation", "extensionElements", "incoming", "outgoing");
 
     private static final String SUPPORTED = "startEvent, endEvent, sequenceFlow, serviceTask, userTask, receiveTask, "
-            + "exclusiveGateway, parallelGateway";
+            + "exclusiveGateway, parallelGateway, subProcess, callActivity";
 
     /**
      * @throws BpmnParseException if the document is not a valid, supported BPMN process
@@ -70,7 +72,23 @@ public final class BpmnParser {
 
         List<FlowNode> nodes = new ArrayList<>();
         List<SequenceFlow> flows = new ArrayList<>();
-        for (Element child : children(process)) {
+        Map<String, String> containers = new LinkedHashMap<>();
+        parseContainer(process, null, nodes, flows, containers);
+
+        ProcessDefinition definition;
+        try {
+            definition = new ProcessDefinition(key, attribute(process, "name"), nodes, flows, containers);
+        } catch (IllegalArgumentException e) {
+            throw new BpmnParseException(e.getMessage(), e);
+        }
+        validateGraph(definition);
+        return definition;
+    }
+
+    /** Collects the nodes and flows of a process or subprocess, descending into nested subprocesses. */
+    private static void parseContainer(Element container, String containerId, List<FlowNode> nodes,
+                                       List<SequenceFlow> flows, Map<String, String> containers) {
+        for (Element child : children(container)) {
             if (!BPMN_NS.equals(child.getNamespaceURI())) {
                 continue;
             }
@@ -80,19 +98,17 @@ public final class BpmnParser {
             }
             if (type.equals("sequenceFlow")) {
                 flows.add(sequenceFlow(child));
-            } else {
-                nodes.add(flowNode(child));
+                continue;
+            }
+            FlowNode node = flowNode(child);
+            nodes.add(node);
+            if (containerId != null) {
+                containers.put(node.id(), containerId);
+            }
+            if (node instanceof SubProcess) {
+                parseContainer(child, node.id(), nodes, flows, containers);
             }
         }
-
-        ProcessDefinition definition;
-        try {
-            definition = new ProcessDefinition(key, attribute(process, "name"), nodes, flows);
-        } catch (IllegalArgumentException e) {
-            throw new BpmnParseException(e.getMessage(), e);
-        }
-        validateGraph(definition);
-        return definition;
     }
 
     private static Document read(byte[] xml) {
@@ -161,11 +177,28 @@ public final class BpmnParser {
             }
             case "exclusiveGateway" -> new ExclusiveGateway(id, name, defaultFlow);
             case "parallelGateway" -> new ParallelGateway(id, name);
+            case "subProcess" -> {
+                if (isTrue(element, "triggeredByEvent")) {
+                    throw new BpmnParseException(describe(element) + ": event subprocesses are not supported");
+                }
+                yield new SubProcess(id, name, defaultFlow);
+            }
+            case "callActivity" -> {
+                String calledElement = element.getAttribute("calledElement").strip();
+                if (calledElement.isEmpty()) {
+                    throw new BpmnParseException(describe(element) + " must name the process to call in calledElement");
+                }
+                yield new CallActivity(id, name, calledElement, defaultFlow);
+            }
             default -> throw new BpmnParseException(
                     "<" + type + " id=\"" + id + "\"> is not supported; supported elements are " + SUPPORTED);
         };
         if (isTrue(element, "isForCompensation")) {
             throw new BpmnParseException(describe(element) + ": compensation is not supported yet");
+        }
+        if (node instanceof SubProcess) {
+            // Its children are the subprocess's own nodes and flows, parsed as a container.
+            return node;
         }
         for (Element child : children(element)) {
             if (BPMN_NS.equals(child.getNamespaceURI()) && !IGNORED_IN_NODE.contains(child.getLocalName())) {
@@ -234,10 +267,17 @@ public final class BpmnParser {
     }
 
     private static void validateGraph(ProcessDefinition definition) {
-        List<FlowNode> starts = definition.nodes().stream().filter(StartEvent.class::isInstance).toList();
-        if (starts.size() != 1) {
-            throw new BpmnParseException("process '" + definition.key() + "' must have exactly one startEvent, found "
-                    + starts.size());
+        List<String> containerIds = new ArrayList<>();
+        containerIds.add(null);
+        definition.nodes().stream().filter(SubProcess.class::isInstance).forEach(node -> containerIds.add(node.id()));
+        for (String containerId : containerIds) {
+            long starts = definition.children(containerId).stream().filter(StartEvent.class::isInstance).count();
+            if (starts != 1) {
+                String container = containerId == null
+                        ? "process '" + definition.key() + "'"
+                        : "subProcess '" + containerId + "'";
+                throw new BpmnParseException(container + " must have exactly one startEvent, found " + starts);
+            }
         }
         for (FlowNode node : definition.nodes()) {
             List<SequenceFlow> outgoing = definition.outgoing(node.id());

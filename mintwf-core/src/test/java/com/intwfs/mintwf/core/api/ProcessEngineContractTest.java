@@ -636,6 +636,163 @@ public abstract class ProcessEngineContractTest {
         assertEquals(List.of("end:COMPLETED"), visits(legacy.id()));
     }
 
+    @Test
+    public void shouldRunAnEmbeddedSubProcessAndLeaveItWhenItsTokensEnd() {
+        // given
+        engine.deploy(process("Embedded", """
+                <startEvent id="start"/>
+                <subProcess id="install">
+                  <startEvent id="installStart"/>
+                  <parallelGateway id="split"/>
+                  <userTask id="mount"/>
+                  <serviceTask id="configure" mintwf:type="record"/>
+                  <endEvent id="mounted"/>
+                  <endEvent id="configured"/>
+                  <sequenceFlow id="i1" sourceRef="installStart" targetRef="split"/>
+                  <sequenceFlow id="i2" sourceRef="split" targetRef="mount"/>
+                  <sequenceFlow id="i3" sourceRef="split" targetRef="configure"/>
+                  <sequenceFlow id="i4" sourceRef="mount" targetRef="mounted"/>
+                  <sequenceFlow id="i5" sourceRef="configure" targetRef="configured"/>
+                </subProcess>
+                <endEvent id="end"/>
+                """ + flow("f1", "start", "install") + flow("f2", "install", "end")));
+        ProcessInstance started = engine.start("Embedded", Map.of());
+        assertEquals(List.of("install", "mount", "configure"), started.activeNodeIds());
+
+        // when one branch ends, the subprocess still holds the other
+        runJobs();
+        ProcessInstance halfway = engine.instance(started.id());
+
+        // then
+        assertEquals(List.of("install", "mount"), halfway.activeNodeIds());
+
+        // when the last branch ends
+        ProcessInstance done = engine.completeTask(started.id(), halfway.tasks().getFirst().id(), Map.of());
+
+        // then
+        assertEquals(InstanceStatus.COMPLETED, done.status());
+        assertEquals(List.of("start:COMPLETED", "install:COMPLETED", "installStart:COMPLETED", "split:COMPLETED",
+                "mount:COMPLETED", "configure:COMPLETED", "configured:COMPLETED", "mounted:COMPLETED",
+                "end:COMPLETED"), visits(started.id()));
+    }
+
+    @Test
+    public void shouldCallAProcessAndResumeWhenTheCalledInstanceCompletes() {
+        // given
+        deployWaiting("Survey");
+        deployCaller("Order", "Survey");
+        ProcessInstance caller = engine.start("Order", "ORD-5", Map.of("site", "S1"));
+
+        // then the called instance runs with a copy of the caller's variables
+        assertEquals(List.of("callSurvey"), caller.activeNodeIds());
+        ProcessInstance called = engine.children(caller.id()).getFirst();
+        assertEquals("Survey", called.processKey());
+        assertEquals(caller.id(), called.parentInstanceId());
+        assertEquals("callSurvey", called.parentNodeId());
+        assertEquals(caller.id(), called.rootInstanceId());
+        assertEquals(caller.id(), caller.rootInstanceId());
+        assertEquals("ORD-5", called.businessKey());
+        assertEquals(Map.of("site", "S1"), called.variables());
+
+        // when
+        ProcessInstance calledDone = engine.completeTask(called.id(), called.tasks().getFirst().id(),
+                Map.of("surveyed", true));
+
+        // then the caller moves on with the called instance's variables
+        assertEquals(InstanceStatus.COMPLETED, calledDone.status());
+        ProcessInstance callerDone = engine.instance(caller.id());
+        assertEquals(InstanceStatus.COMPLETED, callerDone.status());
+        assertEquals(Map.of("site", "S1", "surveyed", true), callerDone.variables());
+        assertEquals(List.of("start:COMPLETED", "callSurvey:COMPLETED", "end:COMPLETED"), visits(caller.id()));
+    }
+
+    @Test
+    public void shouldResumeTheCallerWhenAJobCompletesTheCalledInstance() {
+        // given
+        deployServiceTask("Allocate", "record");
+        deployCaller("Provision", "Allocate");
+        ProcessInstance caller = engine.start("Provision", Map.of());
+        assertEquals(InstanceStatus.ACTIVE, caller.status());
+
+        // when
+        runJobs();
+
+        // then
+        assertEquals(List.of("s"), calls);
+        assertEquals(InstanceStatus.COMPLETED, engine.instance(caller.id()).status());
+        assertEquals(InstanceStatus.COMPLETED, engine.children(caller.id()).getFirst().status());
+    }
+
+    @Test
+    public void shouldCompleteAtOnceWhenTheCalledProcessDoesNotWait() {
+        // given
+        engine.deploy(process("Instant", """
+                <startEvent id="start"/>
+                <endEvent id="end"/>
+                """ + flow("f1", "start", "end")));
+        deployCaller("Wrapper", "Instant");
+
+        // when
+        ProcessInstance done = engine.start("Wrapper", Map.of());
+
+        // then
+        assertEquals(InstanceStatus.COMPLETED, done.status());
+        assertEquals(InstanceStatus.COMPLETED, engine.children(done.id()).getFirst().status());
+    }
+
+    @Test
+    public void shouldCancelCalledInstancesWithTheirCaller() {
+        // given
+        deployWaiting("Inner");
+        deployCaller("Middle", "Inner");
+        deployCaller("Outer", "Middle");
+        ProcessInstance outer = engine.start("Outer", Map.of());
+        ProcessInstance middle = engine.children(outer.id()).getFirst();
+        ProcessInstance inner = engine.children(middle.id()).getFirst();
+        assertEquals(outer.id(), inner.rootInstanceId());
+
+        // when
+        ProcessExecutionException refused = assertThrows(ProcessExecutionException.class,
+                () -> engine.cancel(inner.id()));
+        engine.cancel(outer.id());
+
+        // then
+        assertTrue(refused.getMessage().contains("cancel instance '" + outer.id() + "' instead"),
+                refused.getMessage());
+        assertEquals(InstanceStatus.CANCELLED, engine.instance(middle.id()).status());
+        assertEquals(InstanceStatus.CANCELLED, engine.instance(inner.id()).status());
+        assertEquals(List.of("start:COMPLETED", "t:TERMINATED"), visits(inner.id()));
+    }
+
+    @Test
+    public void shouldFailTheCommandWhenTheCalledProcessIsNotDeployed() {
+        // given
+        deployCaller("Orphan", "Missing");
+
+        // when
+        ProcessExecutionException e = assertThrows(ProcessExecutionException.class,
+                () -> engine.start("Orphan", Map.of()));
+
+        // then
+        assertTrue(e.getMessage().contains("callActivity 'callMissing': no process 'Missing' is deployed"),
+                e.getMessage());
+        assertTrue(engine.instances(InstanceQuery.all()).isEmpty());
+    }
+
+    @Test
+    public void shouldStopAProcessThatCallsItselfWithoutWaiting() {
+        // given
+        deployCaller("Forever", "Forever");
+
+        // when
+        ProcessExecutionException e = assertThrows(ProcessExecutionException.class,
+                () -> engine.start("Forever", Map.of()));
+
+        // then
+        assertTrue(e.getMessage().contains("nested more than 64 deep"), e.getMessage());
+        assertTrue(engine.instances(InstanceQuery.all()).isEmpty());
+    }
+
     protected void runJobs() {
         while (engine.executeDueJobs(10) > 0) {
             // Keep going until nothing is due.
@@ -645,6 +802,16 @@ public abstract class ProcessEngineContractTest {
     /** Returns the instance's history as {@code nodeId:STATE} entries, oldest first. */
     private List<String> visits(String instanceId) {
         return engine.history(instanceId).stream().map(node -> node.nodeId() + ":" + node.state()).toList();
+    }
+
+    /** Deploys a process whose only step calls {@code calledKey}, through call activity {@code call<calledKey>}. */
+    private void deployCaller(String key, String calledKey) {
+        engine.deploy(process(key, """
+                <startEvent id="start"/>
+                <callActivity id="call%s" calledElement="%s"/>
+                <endEvent id="end"/>
+                """.formatted(calledKey, calledKey) + flow("f1", "start", "call" + calledKey)
+                + flow("f2", "call" + calledKey, "end")));
     }
 
     private void deployWaiting(String key) {

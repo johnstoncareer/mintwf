@@ -4,6 +4,7 @@ import com.intwfs.mintwf.core.MintwfException;
 import com.intwfs.mintwf.core.api.InstanceQuery;
 import com.intwfs.mintwf.core.api.InstanceStatus;
 import com.intwfs.mintwf.core.api.NodeInstance;
+import com.intwfs.mintwf.core.spi.CallerLink;
 import com.intwfs.mintwf.core.spi.DeploymentRecord;
 import com.intwfs.mintwf.core.spi.InstanceChange;
 import com.intwfs.mintwf.core.spi.InstanceState;
@@ -41,7 +42,8 @@ public final class JdbcProcessStore implements ProcessStore {
             + "last_error, failed_at, lock_owner, lock_expiry, created_at";
 
     private static final String INSTANCE_COLUMNS = "id, process_key, process_version, business_key, status, "
-            + "started_at, ended_at, revision, doc";
+            + "started_at, ended_at, revision, doc, parent_instance_id, parent_execution_id, parent_node_id, "
+            + "root_instance_id";
 
     private static final String NODE_INSTANCE_COLUMNS = "id, instance_id, execution_id, node_id, node_type, state, "
             + "started_at, ended_at";
@@ -107,28 +109,12 @@ public final class JdbcProcessStore implements ProcessStore {
     }
 
     @Override
-    public void save(InstanceChange change) {
-        InstanceState state = change.state();
+    public void saveAll(List<InstanceChange> changes) {
         run(connection -> {
             connection.setAutoCommit(false);
             try {
-                if (change.expectedRevision() == null) {
-                    insertInstance(connection, state);
-                } else {
-                    updateInstance(connection, state, change.expectedRevision());
-                }
-                try (PreparedStatement delete = connection.prepareStatement("DELETE FROM mintwf_job WHERE id = ?")) {
-                    for (String id : change.deletedJobIds()) {
-                        delete.setString(1, id);
-                        delete.addBatch();
-                    }
-                    delete.executeBatch();
-                }
-                for (Job job : change.createdJobs()) {
-                    insertJob(connection, job);
-                }
-                for (NodeInstance node : change.nodeInstances()) {
-                    writeNodeInstance(connection, node);
+                for (InstanceChange change : changes) {
+                    write(connection, change);
                 }
                 connection.commit();
             } catch (SQLException | RuntimeException e) {
@@ -139,9 +125,31 @@ public final class JdbcProcessStore implements ProcessStore {
         });
     }
 
+    private static void write(Connection connection, InstanceChange change) throws SQLException {
+        InstanceState state = change.state();
+        if (change.expectedRevision() == null) {
+            insertInstance(connection, state);
+        } else {
+            updateInstance(connection, state, change.expectedRevision());
+        }
+        try (PreparedStatement delete = connection.prepareStatement("DELETE FROM mintwf_job WHERE id = ?")) {
+            for (String id : change.deletedJobIds()) {
+                delete.setString(1, id);
+                delete.addBatch();
+            }
+            delete.executeBatch();
+        }
+        for (Job job : change.createdJobs()) {
+            insertJob(connection, job);
+        }
+        for (NodeInstance node : change.nodeInstances()) {
+            writeNodeInstance(connection, node);
+        }
+    }
+
     private static void insertInstance(Connection connection, InstanceState state) throws SQLException {
         try (PreparedStatement insert = connection.prepareStatement("INSERT INTO mintwf_instance ("
-                + INSTANCE_COLUMNS + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
+                + INSTANCE_COLUMNS + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
             insert.setString(1, state.id());
             insert.setString(2, state.processKey());
             insert.setInt(3, state.processVersion());
@@ -151,6 +159,11 @@ public final class JdbcProcessStore implements ProcessStore {
             setInstant(insert, 7, state.endedAt());
             insert.setLong(8, state.revision());
             insert.setString(9, StateCodec.encode(state));
+            CallerLink caller = state.caller();
+            insert.setString(10, caller == null ? null : caller.instanceId());
+            insert.setString(11, caller == null ? null : caller.executionId());
+            insert.setString(12, caller == null ? null : caller.nodeId());
+            insert.setString(13, state.rootInstanceId());
             insert.executeUpdate();
         } catch (SQLException e) {
             throw conflictOr(e, "instance '" + state.id() + "' already exists");
@@ -240,6 +253,12 @@ public final class JdbcProcessStore implements ProcessStore {
         }
         sql.append(" ORDER BY started_at, seq");
         return queryList(sql.toString(), JdbcProcessStore::instance, parameters.toArray());
+    }
+
+    @Override
+    public List<InstanceState> childInstances(String instanceId) {
+        return queryList("SELECT " + INSTANCE_COLUMNS + " FROM mintwf_instance WHERE parent_instance_id = ? "
+                + "ORDER BY started_at, seq", JdbcProcessStore::instance, instanceId);
     }
 
     @Override
@@ -333,9 +352,12 @@ public final class JdbcProcessStore implements ProcessStore {
 
     private static InstanceState instance(ResultSet row) throws SQLException {
         StateCodec.Doc doc = StateCodec.decode(row.getString(9));
+        String parentInstanceId = row.getString(10);
+        CallerLink caller = parentInstanceId == null ? null
+                : new CallerLink(parentInstanceId, row.getString(11), row.getString(12), row.getString(13));
         return new InstanceState(row.getString(1), row.getString(2), row.getInt(3), row.getString(4),
                 InstanceStatus.valueOf(row.getString(5)), doc.variables(), doc.executions(), doc.nextExecutionId(),
-                instant(row, 6), instant(row, 7), row.getLong(8));
+                instant(row, 6), instant(row, 7), row.getLong(8), caller);
     }
 
     private static NodeInstance nodeInstance(ResultSet row) throws SQLException {

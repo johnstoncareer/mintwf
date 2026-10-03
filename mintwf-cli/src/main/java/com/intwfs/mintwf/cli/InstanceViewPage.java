@@ -12,7 +12,8 @@ import java.util.Map;
 
 /**
  * Renders a self-contained HTML page that draws an instance's BPMN diagram and marks which nodes ran, which are
- * active, and which failed. The page loads bpmn-js from a CDN; the instance data is embedded in it.
+ * active, and which failed. The page loads bpmn-js from a CDN; the instance data is embedded in it. Pages of one call
+ * tree sit in one directory and link to each other.
  */
 public final class InstanceViewPage {
 
@@ -22,13 +23,30 @@ public final class InstanceViewPage {
     private InstanceViewPage() {
     }
 
-    public static String render(ProcessInstance instance, List<NodeInstance> history, byte[] bpmnXml) {
+    /**
+     * Returns the file name of an instance's page. Pages of one call tree link to each other by these names.
+     */
+    public static String fileName(String instanceId) {
+        return instanceId + ".html";
+    }
+
+    /**
+     * @param children the instances the instance's call activities started
+     */
+    public static String render(ProcessInstance instance, List<NodeInstance> history, List<ProcessInstance> children,
+                                byte[] bpmnXml) {
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("instance", instance);
         data.put("history", history);
+        data.put("children", children.stream().map(child -> Map.of("id", child.id(), "processKey",
+                child.processKey(), "status", child.status(), "parentNodeId", child.parentNodeId(),
+                "file", fileName(child.id()))).toList());
+        if (instance.parentInstanceId() != null) {
+            data.put("parentFile", fileName(instance.parentInstanceId()));
+        }
         data.put("bpmn", new String(bpmnXml, StandardCharsets.UTF_8));
-        // In JSON, '<' can only occur inside strings, where < means the same. Escaping it stops a variable such as
-        // "</script>" from ending the script element the data sits in.
+        // In JSON, '<' can only occur inside strings, where its JSON unicode escape means the same. Escaping it stops
+        // a variable such as "</script>" from ending the script element the data sits in.
         String json = JsonOutput.JSON.writeValueAsString(data).replace("<", "\\u003c");
         return template().replace(DATA_PLACEHOLDER, json);
     }

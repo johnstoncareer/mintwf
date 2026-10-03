@@ -8,6 +8,7 @@ import com.intwfs.mintwf.core.api.InstanceQuery;
 import com.intwfs.mintwf.core.api.InstanceStatus;
 import com.intwfs.mintwf.core.api.ProcessEngine;
 import com.intwfs.mintwf.core.api.ProcessInstance;
+import com.intwfs.mintwf.core.spi.InstanceState;
 import java.io.InputStream;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -57,8 +58,8 @@ class JdbcProcessStoreTest {
     }
 
     @Test
-    void shouldUpgradeAVersionOneDatabaseAndKeepItsData() throws Exception {
-        // given a database at schema version 1 holding a deployment
+    void shouldUpgradeAVersionOneDatabaseToTheLatestSchemaAndKeepItsData() throws Exception {
+        // given a database at schema version 1 holding a deployment and an instance waiting on a task
         JdbcDataSource dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1");
         String v1;
@@ -76,6 +77,10 @@ class JdbcProcessStoreTest {
             statement.execute("INSERT INTO mintwf_schema VALUES (1, CURRENT_TIMESTAMP)");
             statement.execute("INSERT INTO mintwf_deployment (process_key, version, name, hash, xml, deployed_at) "
                     + "VALUES ('Waiting', 1, NULL, '" + "0".repeat(64) + "', X'00', CURRENT_TIMESTAMP)");
+            statement.execute("INSERT INTO mintwf_instance (id, process_key, process_version, business_key, status, "
+                    + "started_at, ended_at, revision, doc) VALUES ('old-1', 'Waiting', 1, NULL, 'ACTIVE', "
+                    + "CURRENT_TIMESTAMP, NULL, 1, '{\"variables\":{},\"executions\":[{\"id\":\"1\","
+                    + "\"nodeId\":\"t\",\"arrivedVia\":\"f1\"}],\"nextExecutionId\":2}')");
         }
 
         // when
@@ -83,11 +88,15 @@ class JdbcProcessStoreTest {
 
         // then
         assertEquals(1, store.latestDeployment("Waiting").orElseThrow().version());
-        assertEquals(List.of(), store.nodeInstances("any"));
+        assertEquals(List.of(), store.nodeInstances("old-1"));
+        InstanceState old = store.instance("old-1").orElseThrow();
+        assertEquals("old-1", old.rootInstanceId());
+        assertEquals(null, old.caller());
+        assertEquals(null, old.executions().getFirst().scopeId());
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement();
              ResultSet result = statement.executeQuery("SELECT MAX(version) FROM mintwf_schema")) {
             result.next();
-            assertEquals(2, result.getInt(1));
+            assertEquals(SchemaMigrator.latestVersion(), result.getInt(1));
         }
     }
 

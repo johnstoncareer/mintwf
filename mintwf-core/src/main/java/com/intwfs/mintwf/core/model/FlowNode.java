@@ -4,7 +4,8 @@ package com.intwfs.mintwf.core.model;
  * A node in a process graph that tokens move through.
  */
 public sealed interface FlowNode
-        permits StartEvent, EndEvent, ServiceTask, UserTask, ReceiveTask, ExclusiveGateway, ParallelGateway {
+        permits StartEvent, EndEvent, ServiceTask, UserTask, ReceiveTask, ExclusiveGateway, ParallelGateway,
+                SubProcess, CallActivity {
 
     String id();
 

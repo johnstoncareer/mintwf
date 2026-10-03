@@ -38,6 +38,9 @@ final class StateCodec {
             token.put("id", execution.id());
             token.put("nodeId", execution.nodeId());
             token.put("arrivedVia", execution.arrivedVia());
+            if (execution.scopeId() != null) {
+                token.put("scopeId", execution.scopeId());
+            }
             executions.add(token);
         }
         Map<String, Object> doc = new LinkedHashMap<>();
@@ -53,8 +56,9 @@ final class StateCodec {
         List<Execution> executions = new ArrayList<>();
         for (Object token : (List<Object>) doc.get("executions")) {
             Map<String, Object> fields = (Map<String, Object>) token;
+            // Documents written before subprocesses existed have no scopeId: their tokens are at the top level.
             executions.add(new Execution((String) fields.get("id"), (String) fields.get("nodeId"),
-                    (String) fields.get("arrivedVia")));
+                    (String) fields.get("arrivedVia"), (String) fields.get("scopeId")));
         }
         return new Doc((Map<String, Object>) doc.get("variables"), executions,
                 ((Number) doc.get("nextExecutionId")).intValue());

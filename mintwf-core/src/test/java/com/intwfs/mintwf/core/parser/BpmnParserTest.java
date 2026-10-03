@@ -10,10 +10,12 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.intwfs.mintwf.core.model.CallActivity;
 import com.intwfs.mintwf.core.model.ExclusiveGateway;
 import com.intwfs.mintwf.core.model.ProcessDefinition;
 import com.intwfs.mintwf.core.model.ServiceTask;
 import com.intwfs.mintwf.core.model.StartEvent;
+import com.intwfs.mintwf.core.model.SubProcess;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -194,6 +196,60 @@ class BpmnParserTest {
                 <exclusiveGateway id="g" default="f1"/>
                 <endEvent id="end"/>
                 """ + flow("f1", "start", "g") + flow("f2", "g", "end")));
+    }
+
+    @Test
+    void shouldParseSubProcessesAndCallActivitiesWithTheirContainers() {
+        // when
+        ProcessDefinition definition = parser.parse(process("p", """
+                <startEvent id="start"/>
+                <subProcess id="sub">
+                  <startEvent id="subStart"/>
+                  <callActivity id="call" calledElement="Child"/>
+                  <endEvent id="subEnd"/>
+                  <sequenceFlow id="s1" sourceRef="subStart" targetRef="call"/>
+                  <sequenceFlow id="s2" sourceRef="call" targetRef="subEnd"/>
+                </subProcess>
+                <endEvent id="end"/>
+                """ + flow("f1", "start", "sub") + flow("f2", "sub", "end")));
+
+        // then
+        assertInstanceOf(SubProcess.class, definition.node("sub"));
+        assertEquals("Child", ((CallActivity) definition.node("call")).calledElement());
+        assertNull(definition.container("sub"));
+        assertEquals("sub", definition.container("call"));
+        assertEquals("subStart", definition.startEvent("sub").id());
+        assertEquals("start", definition.startEvent(null).id());
+    }
+
+    @Test
+    void shouldRejectInvalidSubProcessesAndCallActivities() {
+        assertParseError("must connect nodes in the same process or subprocess", process("p", """
+                <startEvent id="start"/>
+                <subProcess id="sub">
+                  <startEvent id="subStart"/>
+                  <endEvent id="subEnd"/>
+                  <sequenceFlow id="s1" sourceRef="subStart" targetRef="subEnd"/>
+                </subProcess>
+                <endEvent id="end"/>
+                """ + flow("f1", "start", "sub") + flow("f2", "sub", "end") + flow("f3", "subEnd", "end")));
+        assertParseError("subProcess 'sub' must have exactly one startEvent, found 0", process("p", """
+                <startEvent id="start"/>
+                <subProcess id="sub">
+                  <userTask id="t"/>
+                </subProcess>
+                <endEvent id="end"/>
+                """ + flow("f1", "start", "sub") + flow("f2", "sub", "end")));
+        assertParseError("event subprocesses are not supported", process("p", """
+                <startEvent id="start"/>
+                <subProcess id="sub" triggeredByEvent="true"/>
+                <endEvent id="end"/>
+                """ + flow("f1", "start", "end")));
+        assertParseError("callActivity 'call' must name the process to call", process("p", """
+                <startEvent id="start"/>
+                <callActivity id="call"/>
+                <endEvent id="end"/>
+                """ + flow("f1", "start", "call") + flow("f2", "call", "end")));
     }
 
     private void assertParseError(String expected, byte[] xml) {

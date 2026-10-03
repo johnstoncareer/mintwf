@@ -53,25 +53,30 @@ public final class InMemoryProcessStore implements ProcessStore {
     }
 
     @Override
-    public synchronized void save(InstanceChange change) {
-        InstanceState state = change.state();
-        InstanceState stored = instances.get(state.id());
-        if (change.expectedRevision() == null) {
-            if (stored != null) {
-                throw new OptimisticLockException("instance '" + state.id() + "' already exists");
+    public synchronized void saveAll(List<InstanceChange> changes) {
+        // Check every change before applying any, so a conflict leaves the store untouched.
+        for (InstanceChange change : changes) {
+            InstanceState state = change.state();
+            InstanceState stored = instances.get(state.id());
+            if (change.expectedRevision() == null) {
+                if (stored != null) {
+                    throw new OptimisticLockException("instance '" + state.id() + "' already exists");
+                }
+            } else if (stored == null || stored.revision() != change.expectedRevision()) {
+                throw new OptimisticLockException("instance '" + state.id() + "' was changed concurrently");
             }
-        } else if (stored == null || stored.revision() != change.expectedRevision()) {
-            throw new OptimisticLockException("instance '" + state.id() + "' was changed concurrently");
-        }
-        for (Job job : change.createdJobs()) {
-            if (jobs.containsKey(job.id())) {
-                throw new OptimisticLockException("job '" + job.id() + "' already exists");
+            for (Job job : change.createdJobs()) {
+                if (jobs.containsKey(job.id())) {
+                    throw new OptimisticLockException("job '" + job.id() + "' already exists");
+                }
             }
         }
-        instances.put(state.id(), state);
-        change.deletedJobIds().forEach(jobs::remove);
-        change.createdJobs().forEach(job -> jobs.put(job.id(), job));
-        change.nodeInstances().forEach(node -> nodeInstances.put(node.id(), node));
+        for (InstanceChange change : changes) {
+            instances.put(change.state().id(), change.state());
+            change.deletedJobIds().forEach(jobs::remove);
+            change.createdJobs().forEach(job -> jobs.put(job.id(), job));
+            change.nodeInstances().forEach(node -> nodeInstances.put(node.id(), node));
+        }
     }
 
     @Override
@@ -83,6 +88,13 @@ public final class InMemoryProcessStore implements ProcessStore {
     public synchronized List<InstanceState> instances(InstanceQuery query) {
         return instances.values().stream()
                 .filter(instance -> query.matches(instance.processKey(), instance.status()))
+                .toList();
+    }
+
+    @Override
+    public synchronized List<InstanceState> childInstances(String instanceId) {
+        return instances.values().stream()
+                .filter(instance -> instance.caller() != null && instance.caller().instanceId().equals(instanceId))
                 .toList();
     }
 

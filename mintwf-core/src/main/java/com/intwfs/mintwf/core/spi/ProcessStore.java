@@ -28,7 +28,17 @@ public interface ProcessStore {
      * @throws OptimisticLockException if an inserted instance already exists, or an updated one is missing or no
      *     longer at {@link InstanceChange#expectedRevision()}
      */
-    void save(InstanceChange change);
+    default void save(InstanceChange change) {
+        saveAll(List.of(change));
+    }
+
+    /**
+     * Applies changes to several instances, at most one change each, in one transaction: all of them happen or none
+     * do. A command that starts or resumes instances through call activities saves this way.
+     *
+     * @throws OptimisticLockException if any change fails as {@link #save} describes
+     */
+    void saveAll(List<InstanceChange> changes);
 
     Optional<InstanceState> instance(String id);
 
@@ -36,6 +46,11 @@ public interface ProcessStore {
      * Returns the matching instances, oldest first.
      */
     List<InstanceState> instances(InstanceQuery query);
+
+    /**
+     * Returns the instances that call activities of {@code instanceId} started, oldest first.
+     */
+    List<InstanceState> childInstances(String instanceId);
 
     /**
      * Returns an instance's node instances in the order they were started.

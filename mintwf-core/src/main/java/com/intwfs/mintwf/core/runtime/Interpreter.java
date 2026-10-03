@@ -6,6 +6,7 @@ import com.intwfs.mintwf.core.api.NodeInstance;
 import com.intwfs.mintwf.core.api.NotFoundException;
 import com.intwfs.mintwf.core.api.ProcessExecutionException;
 import com.intwfs.mintwf.core.job.RetryPolicy;
+import com.intwfs.mintwf.core.model.CallActivity;
 import com.intwfs.mintwf.core.model.EndEvent;
 import com.intwfs.mintwf.core.model.ExclusiveGateway;
 import com.intwfs.mintwf.core.model.FlowNode;
@@ -15,7 +16,9 @@ import com.intwfs.mintwf.core.model.ReceiveTask;
 import com.intwfs.mintwf.core.model.SequenceFlow;
 import com.intwfs.mintwf.core.model.ServiceTask;
 import com.intwfs.mintwf.core.model.StartEvent;
+import com.intwfs.mintwf.core.model.SubProcess;
 import com.intwfs.mintwf.core.model.UserTask;
+import com.intwfs.mintwf.core.spi.CallerLink;
 import com.intwfs.mintwf.core.spi.CompiledExpression;
 import com.intwfs.mintwf.core.spi.Execution;
 import com.intwfs.mintwf.core.spi.ExpressionException;
@@ -32,6 +35,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 
 /**
@@ -60,26 +64,43 @@ public final class Interpreter {
     }
 
     /**
-     * The outcome of a command: the instance's next state, the jobs it created, and the node instances it started or
-     * ended, in start order.
+     * The outcome of a command: the instance's next state, the jobs it created, the node instances it started or
+     * ended, in start order, and the call activities its tokens reached, whose instances the caller starts.
      */
-    public record Result(InstanceState state, List<Job> createdJobs, List<NodeInstance> nodeInstances) {
+    public record Result(InstanceState state, List<Job> createdJobs, List<NodeInstance> nodeInstances,
+                         List<Call> calls) {
 
         public Result {
             createdJobs = List.copyOf(createdJobs);
             nodeInstances = List.copyOf(nodeInstances);
+            calls = List.copyOf(calls);
         }
+    }
+
+    /**
+     * A token that reached a {@code callActivity} and waits there for an instance of {@code calledElement}.
+     */
+    public record Call(String executionId, String nodeId, String calledElement) {
     }
 
     /**
      * Creates an instance and runs it from its start event.
      */
     public Result start(ExecutableProcess process, String id, String businessKey, Map<String, ?> variables) {
+        return start(process, id, businessKey, variables, null);
+    }
+
+    /**
+     * Creates an instance that a call activity started, and runs it from its start event.
+     *
+     * @param caller the call activity's instance and token, or {@code null} when nothing called it
+     */
+    public Result start(ExecutableProcess process, String id, String businessKey, Map<String, ?> variables,
+                        CallerLink caller) {
         Run run = new Run(process, new InstanceState(id, process.key(), process.version(), businessKey,
-                InstanceStatus.ACTIVE, Variables.copyOf(variables), List.of(), 1, clock.instant(), null, 0),
+                InstanceStatus.ACTIVE, Variables.copyOf(variables), List.of(), 1, clock.instant(), null, 0, caller),
                 List.of());
-        StartEvent start = (StartEvent) process.definition().nodes().stream()
-                .filter(StartEvent.class::isInstance).findFirst().orElseThrow();
+        StartEvent start = process.definition().startEvent(null);
         Execution token = new Execution(run.newExecutionId(), start.id(), null);
         run.executions.put(token.id(), token);
         run.queue.add(token);
@@ -148,6 +169,29 @@ public final class Interpreter {
     }
 
     /**
+     * Moves on the token that waits on a call activity, after the instance it called completed, merging that
+     * instance's variables into this one.
+     *
+     * @throws ProcessExecutionException if the instance is not active, the token no longer waits on a call activity,
+     *     or the instance fails while running on
+     */
+    public Result completeCallActivity(ExecutableProcess process, InstanceState state, List<NodeInstance> active,
+                                       String executionId, Map<String, ?> calledVariables) {
+        requireActive(state);
+        Run run = new Run(process, state, active);
+        Execution token = run.executions.get(executionId);
+        FlowNode node = token == null ? null : process.definition().node(token.nodeId());
+        if (!(node instanceof CallActivity)) {
+            throw new ProcessExecutionException(
+                    "instance '" + state.id() + "' has no token '" + executionId + "' waiting on a callActivity");
+        }
+        run.variables.putAll(Variables.copyOf(calledVariables));
+        run.leave(token, node);
+        run.drain();
+        return run.finish();
+    }
+
+    /**
      * Ends an active instance, removes its tokens, and terminates its active node instances. The caller deletes the
      * instance's jobs.
      */
@@ -156,11 +200,11 @@ public final class Interpreter {
         Instant now = clock.instant();
         InstanceState cancelled = new InstanceState(state.id(), state.processKey(), state.processVersion(),
                 state.businessKey(), InstanceStatus.CANCELLED, state.variables(), List.of(), state.nextExecutionId(),
-                state.startedAt(), now, state.revision() + 1);
+                state.startedAt(), now, state.revision() + 1, state.caller());
         List<NodeInstance> terminated = active.stream()
                 .map(node -> node.ended(NodeInstance.State.TERMINATED, now))
                 .toList();
-        return new Result(cancelled, List.of(), terminated);
+        return new Result(cancelled, List.of(), terminated, List.of());
     }
 
     private static void requireActive(InstanceState state) {
@@ -204,6 +248,7 @@ public final class Interpreter {
         private final Map<String, Execution> executions = new LinkedHashMap<>();
         private final Deque<Execution> queue = new ArrayDeque<>();
         private final List<Job> createdJobs = new ArrayList<>();
+        private final List<Call> calls = new ArrayList<>();
         /** The node instance each token is on, by execution id. */
         private final Map<String, NodeInstance> activeNodes = new HashMap<>();
         /** Every node instance started or ended in this command, by id; new ones in start order. */
@@ -245,6 +290,7 @@ public final class Interpreter {
                     case EndEvent _ -> {
                         exit(token);
                         executions.remove(token.id());
+                        leaveScopeIfDone(token.scopeId());
                     }
                     case ServiceTask task when task.async() -> createdJobs.add(newJob(token, task));
                     case ServiceTask task -> {
@@ -256,6 +302,14 @@ public final class Interpreter {
                     }
                     case ExclusiveGateway gateway -> take(token, List.of(chooseExclusive(gateway)));
                     case ParallelGateway gateway -> join(token, gateway);
+                    case SubProcess subProcess -> {
+                        // The token waits on the subprocess as its scope token while a token runs inside it.
+                        Execution inner = new Execution(newExecutionId(), definition.startEvent(subProcess.id()).id(),
+                                null, token.id());
+                        executions.put(inner.id(), inner);
+                        queue.add(inner);
+                    }
+                    case CallActivity call -> calls.add(new Call(token.id(), call.id(), call.calledElement()));
                 }
             }
         }
@@ -265,6 +319,15 @@ public final class Interpreter {
                     node.id(), elementName(node), NodeInstance.State.ACTIVE, clock.instant(), null);
             activeNodes.put(token.id(), started);
             nodeInstances.put(started.id(), started);
+        }
+
+        /** Leaves a subprocess once the last token inside it has been consumed. */
+        private void leaveScopeIfDone(String scopeId) {
+            if (scopeId == null || executions.values().stream().anyMatch(e -> scopeId.equals(e.scopeId()))) {
+                return;
+            }
+            Execution scope = executions.get(scopeId);
+            leave(scope, definition.node(scope.nodeId()));
         }
 
         /** Completes the token's node instance. Tokens of instances started before node history have none. */
@@ -327,7 +390,7 @@ public final class Interpreter {
             } else {
                 Map<String, Execution> arrived = new LinkedHashMap<>();
                 for (Execution waiting : executions.values()) {
-                    if (waiting.nodeId().equals(gateway.id())) {
+                    if (waiting.nodeId().equals(gateway.id()) && Objects.equals(waiting.scopeId(), token.scopeId())) {
                         arrived.putIfAbsent(waiting.arrivedVia(), waiting);
                     }
                 }
@@ -335,7 +398,7 @@ public final class Interpreter {
                     return;
                 }
                 arrived.values().forEach(waiting -> executions.remove(waiting.id()));
-                merged = new Execution(newExecutionId(), gateway.id(), null);
+                merged = new Execution(newExecutionId(), gateway.id(), null, token.scopeId());
                 enter(merged, gateway);
             }
             take(merged, definition.outgoing(gateway.id()));
@@ -346,14 +409,14 @@ public final class Interpreter {
             exit(token);
             if (flows.size() == 1) {
                 SequenceFlow flow = flows.getFirst();
-                Execution moved = new Execution(token.id(), flow.targetRef(), flow.id());
+                Execution moved = new Execution(token.id(), flow.targetRef(), flow.id(), token.scopeId());
                 executions.put(moved.id(), moved);
                 queue.add(moved);
                 return;
             }
             executions.remove(token.id());
             for (SequenceFlow flow : flows) {
-                Execution forked = new Execution(newExecutionId(), flow.targetRef(), flow.id());
+                Execution forked = new Execution(newExecutionId(), flow.targetRef(), flow.id(), token.scopeId());
                 executions.put(forked.id(), forked);
                 queue.add(forked);
             }
@@ -383,8 +446,8 @@ public final class Interpreter {
             InstanceState next = new InstanceState(original.id(), original.processKey(), original.processVersion(),
                     original.businessKey(), completed ? InstanceStatus.COMPLETED : InstanceStatus.ACTIVE, variables,
                     List.copyOf(executions.values()), nextExecutionId, original.startedAt(),
-                    completed ? clock.instant() : null, original.revision() + 1);
-            return new Result(next, createdJobs, List.copyOf(nodeInstances.values()));
+                    completed ? clock.instant() : null, original.revision() + 1, original.caller());
+            return new Result(next, createdJobs, List.copyOf(nodeInstances.values()), calls);
         }
     }
 

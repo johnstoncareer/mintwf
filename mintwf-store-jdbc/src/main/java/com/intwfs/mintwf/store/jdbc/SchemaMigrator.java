@@ -23,9 +23,15 @@ import javax.sql.DataSource;
 final class SchemaMigrator {
 
     /** The scripts in order. Script {@code n} brings the schema to version {@code n}. */
-    private static final List<String> SCRIPTS = List.of("V1__create_tables.sql", "V2__create_node_instance.sql");
+    private static final List<String> SCRIPTS = List.of("V1__create_tables.sql", "V2__create_node_instance.sql",
+            "V3__add_instance_caller.sql");
 
     private final DataSource dataSource;
+
+    /** Returns the schema version the scripts bring a database to. */
+    static int latestVersion() {
+        return SCRIPTS.size();
+    }
 
     SchemaMigrator(DataSource dataSource) {
         this.dataSource = dataSource;

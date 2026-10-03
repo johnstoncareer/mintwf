@@ -16,10 +16,12 @@ import java.util.Objects;
  * @param nextExecutionId the id the next new execution will get
  * @param endedAt {@code null} while the instance is active
  * @param revision incremented on every save, for optimistic locking
+ * @param caller the call activity that started this instance, or {@code null} when nothing called it
  */
 public record InstanceState(String id, String processKey, int processVersion, String businessKey,
                             InstanceStatus status, Map<String, Object> variables, List<Execution> executions,
-                            int nextExecutionId, Instant startedAt, Instant endedAt, long revision) {
+                            int nextExecutionId, Instant startedAt, Instant endedAt, long revision,
+                            CallerLink caller) {
 
     public InstanceState {
         Objects.requireNonNull(id, "id");
@@ -28,5 +30,23 @@ public record InstanceState(String id, String processKey, int processVersion, St
         Objects.requireNonNull(startedAt, "startedAt");
         variables = Variables.copyOf(variables);
         executions = List.copyOf(executions);
+    }
+
+    /**
+     * Creates the state of an instance that no call activity started.
+     */
+    public InstanceState(String id, String processKey, int processVersion, String businessKey, InstanceStatus status,
+                         Map<String, Object> variables, List<Execution> executions, int nextExecutionId,
+                         Instant startedAt, Instant endedAt, long revision) {
+        this(id, processKey, processVersion, businessKey, status, variables, executions, nextExecutionId, startedAt,
+                endedAt, revision, null);
+    }
+
+    /**
+     * Returns the id of the instance at the top of this instance's call tree, which is its own id when nothing called
+     * it.
+     */
+    public String rootInstanceId() {
+        return caller == null ? id : caller.rootInstanceId();
     }
 }

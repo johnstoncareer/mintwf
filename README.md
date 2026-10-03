@@ -61,6 +61,8 @@ A document must contain exactly one `process` with `isExecutable="true"`. Other 
 | `userTask`, `receiveTask` | Waits until the task is completed with `complete-task`. |
 | `exclusiveGateway` | Takes the first outgoing flow, in document order, whose condition is true, or else the `default` flow. |
 | `parallelGateway` | Waits for a token on every incoming flow, then continues on every outgoing flow. |
+| `subProcess` | An embedded subprocess with exactly one `startEvent` of its own. It is left once every path inside it has reached an end event. Event subprocesses are not supported. |
+| `callActivity` | Starts an instance of the latest deployed version of the process named by `calledElement`, with a copy of the caller's variables, and waits until it completes. The called instance's variables are then copied back. Cancelling the caller cancels the called instances; a called instance cannot be cancelled on its own. |
 | `sequenceFlow` | An optional `conditionExpression`. A task leaves by every flow whose condition is true, or by its `default` flow if none is. |
 
 `documentation`, `extensionElements`, `laneSet`, `textAnnotation`, `association`, and diagram information are allowed and ignored.
@@ -138,7 +140,7 @@ Each skill runs the matching `bin/mintwf` command, which you can also run yourse
 | `complete-task` | `bin/mintwf complete-task INSTANCE TASK [--vars JSON]`: complete a waiting `userTask` or `receiveTask` |
 | `retry-incident` | `bin/mintwf retry-incident INSTANCE JOB`: give a failed service task a fresh set of attempts |
 | `cancel-instance` | `bin/mintwf cancel-instance INSTANCE`: cancel a running instance |
-| `view-instance` | `bin/mintwf view-instance INSTANCE [--output FILE]`: write an HTML page that draws the instance on its BPMN diagram, marking the nodes that ran, are active, or have an incident, with the full node history. Opening it needs network access to cdn.jsdelivr.net. |
+| `view-instance` | `bin/mintwf view-instance INSTANCE [--directory DIR]`: write HTML pages, one per instance of the call tree, that draw each instance on its BPMN diagram, marking the nodes that ran, are active, or have an incident, with the full node history. Call activities link to the pages of the instances they started. Opening a page needs network access to cdn.jsdelivr.net. |
 | `start-worker` | `bin/mintwf worker`: run service task jobs until stopped. Service tasks only progress while a worker runs. |
 | `correlate-message` | Not implemented yet: deliver a message to the instance waiting for it |
 | `send-signal` | Not implemented yet: broadcast a signal to every instance waiting for it |

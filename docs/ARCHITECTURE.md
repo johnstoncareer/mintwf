@@ -67,7 +67,7 @@ Each skill in `.claude/skills/` runs one `bin/mintwf` subcommand with the same n
 
 - `bin/mintwf` runs `mintwf-cli/target/mintwf.jar`, a shaded jar with every module and dependency. It rebuilds the jar first when the jar is missing or older than any module source or POM. `bin/mintwf.cmd` does the same for cmd and PowerShell, but only builds when the jar is missing.
 - Commands print their result as indented JSON on standard output: a `DeployedProcess`, a `ProcessInstance`, or an array of them.
-- `view-instance` writes an HTML page, by default to `.mintwf/views/INSTANCE.html`, and prints its path. `InstanceViewPage` fills the template `instance-view.html` with the instance, its history, and the deployed BPMN XML as JSON, escaping `<` so instance data cannot end the script element it sits in. In the browser, bpmn-js draws the diagram and marks each node by its node instances; a definition without diagram information is laid out with bpmn-auto-layout. Both load from cdn.jsdelivr.net at pinned versions, so the jar ships no JavaScript.
+- `view-instance` writes one HTML page per instance of the call tree, by default to `.mintwf/views/INSTANCE.html`, and prints their paths. Pages link to each other by file name. `InstanceViewPage` fills the template `instance-view.html` with the instance, its history, and the deployed BPMN XML as JSON, escaping `<` so instance data cannot end the script element it sits in. In the browser, bpmn-js draws the diagram and marks each node by its node instances; a definition without diagram information is laid out with bpmn-auto-layout. Both load from cdn.jsdelivr.net at pinned versions, so the jar ships no JavaScript.
 - A failed command prints `{"error": {"type": ..., "message": ...}}` and exits with 1. The type is derived from the exception: `not_found`, `invalid_bpmn`, `execution_failed`, `invalid_input`, `io_error`, or `internal_error`. Invalid arguments are reported by picocli on standard error with exit code 2.
 - Variables are passed as a JSON object with `--vars` or `--vars-file`.
 - The database is `--database PATH`, else `$MINTWF_DATABASE`, else `.mintwf/mintwf` under the current directory.
@@ -84,6 +84,8 @@ How each node type treats a token:
 - **Exclusive gateway:** leave by the first outgoing flow, in document order, whose condition is true. If none applies, leave by the `default` flow.
 - **Parallel gateway:** wait until a token has arrived on every incoming flow, merge them, then leave by every outgoing flow.
 - **End event:** consume the token. The instance completes when no tokens remain.
+- **Subprocess:** the token stays on the subprocess as its scope token, and a new token starts at the subprocess's start event. Tokens inside carry the scope token's id as `scopeId`. When the last token inside is consumed, the scope token leaves the subprocess. A parallel gateway only joins tokens of the same scope.
+- **Call activity:** the token waits while an instance of `calledElement` runs. See [Call activities](#call-activities).
 
 One command visits at most 10,000 nodes, which stops loops that never reach a wait state.
 
@@ -132,6 +134,14 @@ A service task with `mintwf:async="false"` runs inside the command that reaches 
 
 Variable values are limited to JSON types: string, number, boolean, null, list, and map. They pass unchanged through the CLI, the database, and the skills. The JDBC store reads decimal numbers back as `BigDecimal`, so no precision is lost.
 
+### Call activities
+
+A call activity starts an instance of the latest version of `calledElement` with a copy of the caller's variables and its business key. The called instance records its caller (instance, token, and call activity) and the root of the call tree. When it completes, its variables are merged into the caller and the caller's token moves on.
+
+One command can therefore change several instances: the caller, the instances it starts, and the callers that a completing instance resumes, up to the root. The engine collects every change in a batch and the store saves it with `saveAll` in one transaction, checking each instance's revision. A conflict on any of them retries the whole command. Calls nested more than 64 deep, or more than 1,000 interpreter runs in one command, fail the command.
+
+Cancelling an instance cancels its active called instances. Cancelling a called instance on its own is refused, because its caller would wait forever. See [ADR 0002](adr/0002-subprocesses-call-activities-and-agents.md).
+
 ### Versioning
 
 Deploying stores the BPMN XML and its content hash. Deploying changed content under an existing process key creates a new version. Redeploying identical content is a no-op. An instance stays on the version it started with.
@@ -151,7 +161,7 @@ Tables are prefixed `mintwf_`. When a store opens, numbered scripts in `mintwf-s
 | Table | Purpose | Status |
 |---|---|---|
 | `mintwf_deployment` | Process key, version, BPMN XML, content hash, deploy time | Done |
-| `mintwf_instance` | Id, process key and version, business key, status, timestamps, `doc` (JSON), `revision` | Done |
+| `mintwf_instance` | Id, process key and version, business key, status, timestamps, `doc` (JSON), `revision`, and the caller: `parent_instance_id`, `parent_execution_id`, `parent_node_id`, `root_instance_id` | Done |
 | `mintwf_job` | Type, instance, execution, node, due time, retries left, last error, lock owner, lock expiry. Rows with zero retries are incidents. | Done |
 | `subscription` | Waiting message name, signal name, or timer due time, with the instance and execution. Used by `correlate-message`, `send-signal`, and the timer scan. | Phase 4 |
 | `mintwf_node_instance` | One row per node visit: instance, execution, node id and type, state, start and end time. Only state and end time are ever updated. Ordered by `seq`. | Done |
@@ -166,7 +176,7 @@ A worker claims a job with `UPDATE mintwf_job SET lock_owner = ?, lock_expiry = 
 | 2. Durability | `mintwf-store-jdbc`, the job model, async service tasks, retries, incidents, the worker |
 | 3. CLI and skills | `mintwf-cli` process commands, the runnable jar and launchers, and a skill per command, including `retry-incident` and `start-worker`. `correlate-message` and `send-signal` follow in phase 4. |
 | 4. Events | Message and signal catch events, intermediate and boundary timers, boundary error events |
-| 5. Structure | Compensation, `subProcess`, `callActivity` |
+| 5. Structure | `subProcess` and `callActivity` (done), compensation |
 
 Node history and the `view-instance` page were added outside these phases ([ADR 0001](adr/0001-node-history-and-instance-viewer.md)). The ADR also maps skills, agents, and sub-agents to BPMN for later work.
 
