@@ -2,7 +2,7 @@
 
 A lightweight workflow engine for telecom service and resource orchestration, written entirely by AI.
 
-> **Status:** Early stage. The engine runs the BPMN subset below, stores state in H2, and runs service tasks as retried jobs in a background worker. Processes are managed through Claude skills or the `mintwf` command line. Messages, signals, timers, and compensation are not implemented yet.
+> **Status:** Early stage. The engine runs the BPMN subset below, stores state in H2, and runs service tasks as retried jobs in a background worker. Processes are managed through Claude skills or the `mintwf` command line. Steps can run Claude skills, and `adHocSubProcess` elements run as Claude agents. Messages, signals, timers, and compensation are not implemented yet.
 
 ## Overview
 
@@ -63,6 +63,7 @@ A document must contain exactly one `process` with `isExecutable="true"`. Other 
 | `parallelGateway` | Waits for a token on every incoming flow, then continues on every outgoing flow. |
 | `subProcess` | An embedded subprocess with exactly one `startEvent` of its own. It is left once every path inside it has reached an end event. Event subprocesses are not supported. |
 | `callActivity` | Starts an instance of the latest deployed version of the process named by `calledElement`, with a copy of the caller's variables, and waits until it completes. The called instance's variables are then copied back. Cancelling the caller cancels the called instances; a called instance cannot be cancelled on its own. |
+| `adHocSubProcess` | An agent: its `documentation` is the goal, and its activities without an incoming flow are what it can start. See [Agents](#agents). `completionCondition` is not supported. |
 | `sequenceFlow` | An optional `conditionExpression`. A task leaves by every flow whose condition is true, or by its `default` flow if none is. |
 
 `documentation`, `extensionElements`, `laneSet`, `textAnnotation`, `association`, and diagram information are allowed and ignored.
@@ -124,6 +125,35 @@ A service task with `mintwf:type="skill"` runs a [Claude skill](https://docs.cla
 | `model` | The Claude model. Defaults to `$MINTWF_CLAUDE_MODEL`, else `claude-opus-5`. |
 
 The skill gets no tools: it cannot run commands or call systems, so it suits steps such as classifying, summarizing, or drafting. The worker needs Anthropic API credentials, usually `ANTHROPIC_API_KEY`. If Claude declines or the call fails, the task is retried and then becomes an incident like any other service task.
+
+### Agents
+
+An `adHocSubProcess` runs as an agent. Each turn, the agent planner sees the goal, the variables, and what has run inside the agent so far, and either starts some of the agent's activities or completes the agent. The next turn comes once everything it started has finished. Each activity it starts gets node history, retries, and incidents like any other step, so the instance view shows which activities the agent ran, and in what order.
+
+A sub-agent is a `callActivity` inside an agent that calls another process containing an agent.
+
+```xml
+<adHocSubProcess id="resolve" name="Fallout agent">
+  <documentation>Find why the activation failed and fix it, or hand it to an engineer.</documentation>
+  <extensionElements>
+    <mintwf:field name="resultVariable" value="resolution"/>
+  </extensionElements>
+  <serviceTask id="diagnose" name="Diagnose" mintwf:type="http">...</serviceTask>
+  <serviceTask id="retryActivation" name="Retry activation" mintwf:type="http">...</serviceTask>
+  <userTask id="askEngineer" name="Ask an engineer"/>
+  <callActivity id="escalate" name="Escalation agent" calledElement="EscalationAgent"/>
+</adHocSubProcess>
+```
+
+| Field | Meaning |
+|---|---|
+| `model` | The Claude model. Defaults to `$MINTWF_CLAUDE_MODEL`, else `claude-opus-5`. |
+| `resultVariable` | Where the agent's final result is stored. Defaults to the agent's id followed by `Result`. |
+| `maxActivations` | How many activities the agent may start in one run. Defaults to 50; the next turn then fails as an incident. |
+
+`ordering="Sequential"` limits the agent to one activity per turn. Activities inside an agent may chain with sequence flows; a path ends where a node has no outgoing flow. An activity's `documentation` tells the agent what it does.
+
+The planner in `mintwf-claude` makes one Claude request per turn, with one tool per activity and a `mintwf_finish` tool, and needs the same credentials as skill tasks. A turn is a job, so agents only progress while a worker runs, and a failed turn is retried and then becomes an incident. Other planners can implement `com.intwfs.mintwf.core.spi.AgentPlanner`.
 
 ## Process Commands
 
@@ -205,7 +235,7 @@ bin/mintwf list-instances --status ACTIVE
 | `mintwf-core` | Engine core: BPMN parser, model, interpreter, and extension points. No runtime dependencies. |
 | `mintwf-store-jdbc` | Stores deployments, instances, and jobs in a database, H2 by default. |
 | `mintwf-handler-http` | The `http` task handler. |
-| `mintwf-claude` | The `skill` task handler, which calls Claude. |
+| `mintwf-claude` | The `skill` task handler and the agent planner, which call Claude. |
 | `mintwf-cli` | The `mintwf` command line and worker, packaged as `mintwf.jar`. |
 
 Java packages live under `com.intwfs.mintwf`.

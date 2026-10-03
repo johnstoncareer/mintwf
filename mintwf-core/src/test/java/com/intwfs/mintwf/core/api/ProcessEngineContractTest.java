@@ -12,6 +12,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.intwfs.mintwf.core.TestClock;
 import com.intwfs.mintwf.core.parser.BpmnParseException;
+import com.intwfs.mintwf.core.spi.AgentContext;
+import com.intwfs.mintwf.core.spi.AgentDecision;
 import com.intwfs.mintwf.core.spi.Execution;
 import com.intwfs.mintwf.core.spi.InstanceChange;
 import com.intwfs.mintwf.core.spi.InstanceState;
@@ -20,10 +22,12 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
@@ -39,10 +43,20 @@ public abstract class ProcessEngineContractTest {
 
     private final List<String> calls = Collections.synchronizedList(new ArrayList<>());
     private final AtomicInteger failuresLeft = new AtomicInteger();
+    private final Deque<AgentDecision> decisions = new ConcurrentLinkedDeque<>();
+    private final List<AgentContext> contexts = Collections.synchronizedList(new ArrayList<>());
 
     protected final ProcessEngine engine = ProcessEngine.builder()
             .store(store)
             .clock(clock)
+            .agentPlanner(context -> {
+                contexts.add(context);
+                AgentDecision decision = decisions.poll();
+                if (decision == null) {
+                    throw new IllegalStateException("no decision queued");
+                }
+                return decision;
+            })
             .taskHandler("record", context -> calls.add(context.activityId()))
             .taskHandler("allocate", context -> {
                 calls.add(context.activityId());
@@ -793,6 +807,105 @@ public abstract class ProcessEngineContractTest {
         assertTrue(engine.instances(InstanceQuery.all()).isEmpty());
     }
 
+    @Test
+    public void shouldLetAnAgentStartActivitiesTurnByTurnUntilItCompletes() {
+        // given an agent that can look something up or ask a person
+        deployAgent("Assistant", "");
+        decisions.add(new AgentDecision.Activate(List.of(new AgentDecision.Activation("lookup",
+                Map.of("query", "fiber at S1")))));
+        decisions.add(new AgentDecision.Activate(List.of(new AgentDecision.Activation("ask", Map.of()))));
+        ProcessInstance started = engine.start("Assistant", "ORD-9", Map.of("site", "S1"));
+        assertEquals(List.of("agent"), started.activeNodeIds());
+
+        // when the first turn looks something up, and the second turn asks a person
+        runJobs();
+
+        // then
+        assertEquals(List.of("lookup"), calls);
+        AgentContext first = contexts.getFirst();
+        assertEquals("agent", first.agentId());
+        assertEquals("Answer the customer's question about site S1.", first.goal());
+        assertEquals("ORD-9", first.businessKey());
+        assertEquals(List.of("lookup", "ask"), first.activities().stream().map(AgentContext.Activity::id).toList());
+        assertEquals("Looks up the inventory.", first.activities().getFirst().documentation());
+        assertEquals("serviceTask", first.activities().getFirst().type());
+        assertTrue(first.steps().isEmpty());
+        AgentContext second = contexts.get(1);
+        assertEquals(List.of("lookup"), second.steps().stream().map(AgentContext.Step::nodeId).toList());
+        assertEquals("fiber at S1", second.variables().get("query"));
+        ProcessInstance asking = engine.instance(started.id());
+        assertEquals(List.of("agent", "ask"), asking.activeNodeIds());
+
+        // when the person answers, and the third turn completes the agent
+        decisions.add(new AgentDecision.Complete(Map.of("answer", "available")));
+        engine.completeTask(started.id(), asking.tasks().getFirst().id(), Map.of("reply", "yes"));
+        runJobs();
+
+        // then
+        ProcessInstance done = engine.instance(started.id());
+        assertEquals(InstanceStatus.COMPLETED, done.status());
+        assertEquals("available", done.variables().get("answer"));
+        assertEquals(List.of("lookup", "ask"), contexts.get(2).steps().stream().map(AgentContext.Step::nodeId)
+                .toList());
+        assertEquals(List.of("start:COMPLETED", "agent:COMPLETED", "lookup:COMPLETED", "ask:COMPLETED",
+                "end:COMPLETED"), visits(started.id()));
+    }
+
+    @Test
+    public void shouldRaiseAnIncidentWhenTheAgentStartsAnActivityItCannot() {
+        // given
+        deployAgent("Confused", "");
+        for (int i = 0; i < 3; i++) {
+            decisions.add(new AgentDecision.Activate(List.of(new AgentDecision.Activation("nope", Map.of()))));
+        }
+        ProcessInstance started = engine.start("Confused", Map.of());
+
+        // when every attempt makes the same decision
+        runJobsUntilIncident();
+
+        // then
+        Incident incident = engine.instance(started.id()).incidents().getFirst();
+        assertEquals("agent", incident.nodeId());
+        assertTrue(incident.error().contains("the agent cannot start 'nope'; it can start [lookup, ask]"),
+                incident.error());
+        assertEquals(List.of("start:COMPLETED", "agent:ACTIVE"), visits(started.id()));
+    }
+
+    @Test
+    public void shouldRaiseAnIncidentWhenAnAgentReachesItsActivationLimit() {
+        // given an agent that may start one activity
+        deployAgent("Limited", "<mintwf:field name=\"maxActivations\" value=\"1\"/>");
+        decisions.add(new AgentDecision.Activate(List.of(new AgentDecision.Activation("lookup", Map.of()))));
+        ProcessInstance started = engine.start("Limited", Map.of());
+
+        // when
+        runJobsUntilIncident();
+
+        // then the planner was not asked again once the limit was reached
+        assertEquals(1, contexts.size());
+        assertTrue(engine.instance(started.id()).incidents().getFirst().error()
+                .contains("the agent has started 1 activities, its limit"));
+    }
+
+    @Test
+    public void shouldRaiseAnIncidentWhenNoAgentPlannerIsConfigured() {
+        // given
+        ProcessEngine withoutPlanner = ProcessEngine.builder().store(store).clock(clock)
+                .discoverTaskHandlers(false).build();
+        deployAgent("Unplanned", "");
+        ProcessInstance started = withoutPlanner.start("Unplanned", Map.of());
+
+        // when
+        for (int i = 0; i < 3; i++) {
+            withoutPlanner.executeDueJobs(10);
+            clock.advance(Duration.ofMinutes(1));
+        }
+
+        // then
+        assertTrue(withoutPlanner.instance(started.id()).incidents().getFirst().error()
+                .contains("no AgentPlanner is configured"));
+    }
+
     protected void runJobs() {
         while (engine.executeDueJobs(10) > 0) {
             // Keep going until nothing is due.
@@ -802,6 +915,33 @@ public abstract class ProcessEngineContractTest {
     /** Returns the instance's history as {@code nodeId:STATE} entries, oldest first. */
     private List<String> visits(String instanceId) {
         return engine.history(instanceId).stream().map(node -> node.nodeId() + ":" + node.state()).toList();
+    }
+
+    /** Runs jobs, moving the clock past each retry backoff, until every attempt has been used. */
+    private void runJobsUntilIncident() {
+        for (int i = 0; i < 3; i++) {
+            runJobs();
+            clock.advance(Duration.ofMinutes(1));
+        }
+    }
+
+    /**
+     * Deploys a process whose only step is agent {@code agent}, which can start {@code lookup}, a synchronous service
+     * task that records its call, or {@code ask}, a user task.
+     */
+    private void deployAgent(String key, String fields) {
+        engine.deploy(process(key, """
+                <startEvent id="start"/>
+                <adHocSubProcess id="agent" name="Assistant">
+                  <documentation>Answer the customer's question about site S1.</documentation>
+                  <extensionElements>%s</extensionElements>
+                  <serviceTask id="lookup" mintwf:type="record" mintwf:async="false">
+                    <documentation>Looks up the inventory.</documentation>
+                  </serviceTask>
+                  <userTask id="ask" name="Ask the customer"/>
+                </adHocSubProcess>
+                <endEvent id="end"/>
+                """.formatted(fields) + flow("f1", "start", "agent") + flow("f2", "agent", "end")));
     }
 
     /** Deploys a process whose only step calls {@code calledKey}, through call activity {@code call<calledKey>}. */

@@ -12,6 +12,9 @@ import com.intwfs.mintwf.core.parser.BpmnParser;
 import com.intwfs.mintwf.core.runtime.ExecutableProcess;
 import com.intwfs.mintwf.core.runtime.InMemoryProcessStore;
 import com.intwfs.mintwf.core.runtime.Interpreter;
+import com.intwfs.mintwf.core.spi.AgentContext;
+import com.intwfs.mintwf.core.spi.AgentDecision;
+import com.intwfs.mintwf.core.spi.AgentPlanner;
 import com.intwfs.mintwf.core.spi.CallerLink;
 import com.intwfs.mintwf.core.spi.DeploymentRecord;
 import com.intwfs.mintwf.core.spi.Execution;
@@ -38,6 +41,7 @@ import java.util.Objects;
 import java.util.ServiceLoader;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -74,10 +78,12 @@ public final class ProcessEngine {
     private final Duration jobLockDuration;
     private final String workerId;
     private final Interpreter interpreter;
+    private final AgentPlanner agentPlanner;
     private final BpmnParser parser = new BpmnParser();
     private final Map<String, ExecutableProcess> processes = new ConcurrentHashMap<>();
 
-    private ProcessEngine(Builder builder, Map<String, TaskHandler> handlers) {
+    private ProcessEngine(Builder builder, Map<String, TaskHandler> handlers, AgentPlanner agentPlanner) {
+        this.agentPlanner = agentPlanner;
         this.store = builder.store;
         this.evaluator = builder.evaluator;
         this.clock = builder.clock;
@@ -285,9 +291,22 @@ public final class ProcessEngine {
             return;
         }
         ExecutableProcess process = executable(state.processKey(), state.processVersion());
-        Map<String, Object> changes;
+        // The handler or planner runs outside any transaction; its result is applied to the latest state after.
+        Function<Pending, Interpreter.Result> apply;
         try {
-            changes = interpreter.runHandler(process, state, job);
+            apply = switch (job.type()) {
+                case SERVICE_TASK -> {
+                    Map<String, Object> changes = interpreter.runHandler(process, state, job);
+                    yield instance -> interpreter.completeServiceTask(process, instance.state, instance.active(), job,
+                            changes);
+                }
+                case AGENT_TURN -> {
+                    AgentDecision decision = decide(interpreter.agentContext(process, state, job,
+                            store.nodeInstances(state.id())));
+                    yield instance -> interpreter.applyAgentDecision(process, instance.state, instance.active(), job,
+                            decision);
+                }
+            };
         } catch (MintwfException e) {
             fail(job, e);
             return;
@@ -301,13 +320,32 @@ public final class ProcessEngine {
                     return null;
                 }
                 instance.deletedJobIds.add(job.id());
-                batch.settle(instance,
-                        interpreter.completeServiceTask(process, instance.state, instance.active(), job, changes), 0);
+                batch.settle(instance, apply.apply(instance), 0);
                 batch.save();
                 return null;
             });
         } catch (ProcessExecutionException e) {
             fail(job, e);
+        }
+    }
+
+    private AgentDecision decide(AgentContext context) {
+        if (agentPlanner == null) {
+            throw new ProcessExecutionException("adHocSubProcess '" + context.agentId() + "': no AgentPlanner is "
+                    + "configured; add mintwf-claude to the classpath or set one on the engine builder");
+        }
+        try {
+            AgentDecision decision = agentPlanner.decide(context);
+            if (decision == null) {
+                throw new ProcessExecutionException("adHocSubProcess '" + context.agentId()
+                        + "': the agent planner returned no decision");
+            }
+            return decision;
+        } catch (MintwfException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ProcessExecutionException("adHocSubProcess '" + context.agentId() + "': the agent planner "
+                    + "failed: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()), e);
         }
     }
 
@@ -515,6 +553,7 @@ public final class ProcessEngine {
         private String workerId = UUID.randomUUID().toString();
         private final Map<String, TaskHandler> handlers = new HashMap<>();
         private boolean discoverHandlers = true;
+        private AgentPlanner agentPlanner;
 
         private Builder() {
         }
@@ -577,7 +616,17 @@ public final class ProcessEngine {
         }
 
         /**
-         * @throws IllegalStateException if two discovered providers serve the same type
+         * Sets the planner that runs agents ({@code adHocSubProcess}). Without one, the engine uses the planner found
+         * through {@link ServiceLoader} while handler discovery is on.
+         */
+        public Builder agentPlanner(AgentPlanner agentPlanner) {
+            this.agentPlanner = Objects.requireNonNull(agentPlanner, "agentPlanner");
+            return this;
+        }
+
+        /**
+         * @throws IllegalStateException if two discovered providers serve the same type, or several agent planners are
+         *     discovered
          */
         public ProcessEngine build() {
             Map<String, TaskHandler> all = new HashMap<>();
@@ -590,7 +639,18 @@ public final class ProcessEngine {
                 }
             }
             all.putAll(handlers);
-            return new ProcessEngine(this, all);
+            AgentPlanner planner = agentPlanner;
+            if (planner == null && discoverHandlers) {
+                List<AgentPlanner> found = ServiceLoader.load(AgentPlanner.class).stream()
+                        .map(ServiceLoader.Provider::get)
+                        .toList();
+                if (found.size() > 1) {
+                    throw new IllegalStateException("more than one AgentPlanner was discovered; set one with "
+                            + "agentPlanner()");
+                }
+                planner = found.isEmpty() ? null : found.getFirst();
+            }
+            return new ProcessEngine(this, all, planner);
         }
     }
 }

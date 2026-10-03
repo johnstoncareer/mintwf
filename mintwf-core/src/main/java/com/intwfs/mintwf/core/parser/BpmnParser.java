@@ -1,5 +1,6 @@
 package com.intwfs.mintwf.core.parser;
 
+import com.intwfs.mintwf.core.model.AdHocSubProcess;
 import com.intwfs.mintwf.core.model.CallActivity;
 import com.intwfs.mintwf.core.model.EndEvent;
 import com.intwfs.mintwf.core.model.ExclusiveGateway;
@@ -58,7 +59,7 @@ public final class BpmnParser {
     private static final Set<String> IGNORED_IN_NODE = Set.of("documentation", "extensionElements", "incoming", "outgoing");
 
     private static final String SUPPORTED = "startEvent, endEvent, sequenceFlow, serviceTask, userTask, receiveTask, "
-            + "exclusiveGateway, parallelGateway, subProcess, callActivity";
+            + "exclusiveGateway, parallelGateway, subProcess, adHocSubProcess, callActivity";
 
     /**
      * @throws BpmnParseException if the document is not a valid, supported BPMN process
@@ -73,11 +74,13 @@ public final class BpmnParser {
         List<FlowNode> nodes = new ArrayList<>();
         List<SequenceFlow> flows = new ArrayList<>();
         Map<String, String> containers = new LinkedHashMap<>();
-        parseContainer(process, null, nodes, flows, containers);
+        Map<String, String> documentation = new LinkedHashMap<>();
+        parseContainer(process, null, nodes, flows, containers, documentation);
 
         ProcessDefinition definition;
         try {
-            definition = new ProcessDefinition(key, attribute(process, "name"), nodes, flows, containers);
+            definition = new ProcessDefinition(key, attribute(process, "name"), nodes, flows, containers,
+                    documentation);
         } catch (IllegalArgumentException e) {
             throw new BpmnParseException(e.getMessage(), e);
         }
@@ -87,7 +90,8 @@ public final class BpmnParser {
 
     /** Collects the nodes and flows of a process or subprocess, descending into nested subprocesses. */
     private static void parseContainer(Element container, String containerId, List<FlowNode> nodes,
-                                       List<SequenceFlow> flows, Map<String, String> containers) {
+                                       List<SequenceFlow> flows, Map<String, String> containers,
+                                       Map<String, String> documentation) {
         for (Element child : children(container)) {
             if (!BPMN_NS.equals(child.getNamespaceURI())) {
                 continue;
@@ -100,15 +104,35 @@ public final class BpmnParser {
                 flows.add(sequenceFlow(child));
                 continue;
             }
+            if (type.equals("completionCondition")) {
+                throw new BpmnParseException(describe(container) + ": completionCondition is not supported; the "
+                        + "agent decides when it is done");
+            }
             FlowNode node = flowNode(child);
             nodes.add(node);
             if (containerId != null) {
                 containers.put(node.id(), containerId);
             }
-            if (node instanceof SubProcess) {
-                parseContainer(child, node.id(), nodes, flows, containers);
+            String text = documentationText(child);
+            if (text != null) {
+                documentation.put(node.id(), text);
+            }
+            if (node instanceof SubProcess || node instanceof AdHocSubProcess) {
+                parseContainer(child, node.id(), nodes, flows, containers, documentation);
             }
         }
+    }
+
+    /** Returns the text of an element's {@code documentation} children, or {@code null} when it has none. */
+    private static String documentationText(Element element) {
+        StringBuilder text = new StringBuilder();
+        for (Element child : children(element)) {
+            if (BPMN_NS.equals(child.getNamespaceURI()) && "documentation".equals(child.getLocalName())) {
+                text.append(child.getTextContent().strip()).append('\n');
+            }
+        }
+        String joined = text.toString().strip();
+        return joined.isEmpty() ? null : joined;
     }
 
     private static Document read(byte[] xml) {
@@ -183,6 +207,7 @@ public final class BpmnParser {
                 }
                 yield new SubProcess(id, name, defaultFlow);
             }
+            case "adHocSubProcess" -> adHocSubProcess(element, id, name, defaultFlow);
             case "callActivity" -> {
                 String calledElement = element.getAttribute("calledElement").strip();
                 if (calledElement.isEmpty()) {
@@ -196,7 +221,7 @@ public final class BpmnParser {
         if (isTrue(element, "isForCompensation")) {
             throw new BpmnParseException(describe(element) + ": compensation is not supported yet");
         }
-        if (node instanceof SubProcess) {
+        if (node instanceof SubProcess || node instanceof AdHocSubProcess) {
             // Its children are the subprocess's own nodes and flows, parsed as a container.
             return node;
         }
@@ -209,11 +234,47 @@ public final class BpmnParser {
         return node;
     }
 
+    private static AdHocSubProcess adHocSubProcess(Element element, String id, String name, String defaultFlow) {
+        String goal = documentationText(element);
+        if (goal == null) {
+            throw new BpmnParseException(describe(element) + " needs a documentation element that states the "
+                    + "agent's goal");
+        }
+        String ordering = element.getAttribute("ordering").strip();
+        if (!ordering.isEmpty() && !ordering.equals("Parallel") && !ordering.equals("Sequential")) {
+            throw new BpmnParseException(describe(element) + ": ordering must be Parallel or Sequential");
+        }
+        Map<String, String> fields = fields(element);
+        int maxActivations = AdHocSubProcess.DEFAULT_MAX_ACTIVATIONS;
+        if (fields.containsKey("maxActivations")) {
+            try {
+                maxActivations = Integer.parseInt(fields.get("maxActivations").strip());
+            } catch (NumberFormatException e) {
+                maxActivations = 0;
+            }
+            if (maxActivations < 1) {
+                throw new BpmnParseException(describe(element) + ": maxActivations must be a positive whole number");
+            }
+        }
+        return new AdHocSubProcess(id, name, defaultFlow, goal, fields, ordering.equals("Sequential"),
+                maxActivations);
+    }
+
     private static ServiceTask serviceTask(Element element, String id, String name, String defaultFlow) {
         String handlerType = element.getAttributeNS(MINTWF_NS, "type");
         if (handlerType.isBlank()) {
             throw new BpmnParseException(describe(element) + " must declare a handler with the mintwf:type attribute");
         }
+        Map<String, String> fields = fields(element);
+        String async = element.getAttributeNS(MINTWF_NS, "async").strip();
+        if (!async.isEmpty() && !async.equals("true") && !async.equals("false")) {
+            throw new BpmnParseException(describe(element) + ": mintwf:async must be true or false");
+        }
+        return new ServiceTask(id, name, handlerType.strip(), fields, !async.equals("false"), defaultFlow);
+    }
+
+    /** Reads the {@code mintwf:field} extension elements of a node. */
+    private static Map<String, String> fields(Element element) {
         Map<String, String> fields = new LinkedHashMap<>();
         for (Element extensions : children(element)) {
             if (!BPMN_NS.equals(extensions.getNamespaceURI()) || !"extensionElements".equals(extensions.getLocalName())) {
@@ -232,11 +293,7 @@ public final class BpmnParser {
                 }
             }
         }
-        String async = element.getAttributeNS(MINTWF_NS, "async").strip();
-        if (!async.isEmpty() && !async.equals("true") && !async.equals("false")) {
-            throw new BpmnParseException(describe(element) + ": mintwf:async must be true or false");
-        }
-        return new ServiceTask(id, name, handlerType.strip(), fields, !async.equals("false"), defaultFlow);
+        return fields;
     }
 
     private static SequenceFlow sequenceFlow(Element element) {
@@ -270,6 +327,22 @@ public final class BpmnParser {
         List<String> containerIds = new ArrayList<>();
         containerIds.add(null);
         definition.nodes().stream().filter(SubProcess.class::isInstance).forEach(node -> containerIds.add(node.id()));
+        for (FlowNode agent : definition.nodes()) {
+            if (!(agent instanceof AdHocSubProcess)) {
+                continue;
+            }
+            List<FlowNode> inside = definition.children(agent.id());
+            for (FlowNode node : inside) {
+                if (node instanceof StartEvent || node instanceof EndEvent) {
+                    throw new BpmnParseException(describe(node) + ": an adHocSubProcess cannot contain start or end "
+                            + "events; paths inside it end where they have no outgoing flow");
+                }
+            }
+            if (inside.stream().noneMatch(node -> definition.incoming(node.id()).isEmpty())) {
+                throw new BpmnParseException(describe(agent) + " needs at least one activity without an incoming "
+                        + "flow for the agent to start");
+            }
+        }
         for (String containerId : containerIds) {
             long starts = definition.children(containerId).stream().filter(StartEvent.class::isInstance).count();
             if (starts != 1) {
@@ -283,16 +356,19 @@ public final class BpmnParser {
             List<SequenceFlow> outgoing = definition.outgoing(node.id());
             List<SequenceFlow> incoming = definition.incoming(node.id());
             String label = describe(node);
+            boolean inAgent = definition.container(node.id()) != null
+                    && definition.node(definition.container(node.id())) instanceof AdHocSubProcess;
+            boolean gateway = node instanceof ExclusiveGateway || node instanceof ParallelGateway;
             if (node instanceof StartEvent && !incoming.isEmpty()) {
                 throw new BpmnParseException(label + " must not have incoming sequence flows");
             }
-            if (!(node instanceof StartEvent) && incoming.isEmpty()) {
+            if (!(node instanceof StartEvent) && incoming.isEmpty() && !inAgent) {
                 throw new BpmnParseException(label + " is unreachable: it has no incoming sequence flow");
             }
             if (node instanceof EndEvent && !outgoing.isEmpty()) {
                 throw new BpmnParseException(label + " must not have outgoing sequence flows");
             }
-            if (!(node instanceof EndEvent) && outgoing.isEmpty()) {
+            if (!(node instanceof EndEvent) && outgoing.isEmpty() && !(inAgent && !gateway)) {
                 throw new BpmnParseException(label + " has no outgoing sequence flow; end the path with an endEvent");
             }
             String defaultFlow = node.defaultFlow();

@@ -5,7 +5,7 @@ package com.intwfs.mintwf.core.model;
  */
 public sealed interface FlowNode
         permits StartEvent, EndEvent, ServiceTask, UserTask, ReceiveTask, ExclusiveGateway, ParallelGateway,
-                SubProcess, CallActivity {
+                SubProcess, AdHocSubProcess, CallActivity {
 
     String id();
 

@@ -17,7 +17,8 @@ If the user gives a business key (such as an order id) rather than an instance i
 
 - The diagram, with completed nodes in green, active nodes in blue, nodes with an incident in red, and nodes of a cancelled instance in grey. A badge on each node counts how many times it was visited.
 - The incidents and their errors.
-- The instances its call activities started, with links to their pages. Clicking a call activity on the diagram opens the instance it started, and a called instance's page links back to its caller.
+- The instances its call activities started, with links to their pages. Clicking a call activity on the diagram opens the instance it started, and a called instance's page links back to its caller. A sub-agent is such a called instance.
+- Inside an agent (`adHocSubProcess`), badges such as `#1` and `#3` give the order the agent ran each activity in. Agents and subprocesses are drawn collapsed; the arrow on them opens their inside.
 - The history: every node the instance visited, in order, with start and end times.
 
 The page is a snapshot. Run the command again to refresh it.

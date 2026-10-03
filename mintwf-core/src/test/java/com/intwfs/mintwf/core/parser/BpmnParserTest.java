@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.intwfs.mintwf.core.model.AdHocSubProcess;
 import com.intwfs.mintwf.core.model.CallActivity;
 import com.intwfs.mintwf.core.model.ExclusiveGateway;
 import com.intwfs.mintwf.core.model.ProcessDefinition;
@@ -250,6 +251,71 @@ class BpmnParserTest {
                 <callActivity id="call"/>
                 <endEvent id="end"/>
                 """ + flow("f1", "start", "call") + flow("f2", "call", "end")));
+    }
+
+    @Test
+    void shouldParseAnAdHocSubProcessAsAnAgent() {
+        // when
+        ProcessDefinition definition = parser.parse(process("p", """
+                <startEvent id="start"/>
+                <adHocSubProcess id="agent" ordering="Sequential">
+                  <documentation>Resolve the fallout.</documentation>
+                  <extensionElements>
+                    <mintwf:field name="model" value="claude-sonnet-5"/>
+                    <mintwf:field name="maxActivations" value="7"/>
+                  </extensionElements>
+                  <userTask id="ask"><documentation>Ask an engineer.</documentation></userTask>
+                  <serviceTask id="retry" mintwf:type="http"/>
+                  <serviceTask id="log" mintwf:type="http"/>
+                  <sequenceFlow id="a1" sourceRef="retry" targetRef="log"/>
+                </adHocSubProcess>
+                <endEvent id="end"/>
+                """ + flow("f1", "start", "agent") + flow("f2", "agent", "end")));
+
+        // then
+        AdHocSubProcess agent = (AdHocSubProcess) definition.node("agent");
+        assertEquals("Resolve the fallout.", agent.goal());
+        assertTrue(agent.sequential());
+        assertEquals(7, agent.maxActivations());
+        assertEquals("claude-sonnet-5", agent.fields().get("model"));
+        assertEquals("agent", definition.container("log"));
+        assertEquals("Ask an engineer.", definition.documentation("ask"));
+    }
+
+    @Test
+    void shouldRejectInvalidAgents() {
+        assertParseError("needs a documentation element that states the agent's goal", process("p", """
+                <startEvent id="start"/>
+                <adHocSubProcess id="agent"><userTask id="t"/></adHocSubProcess>
+                <endEvent id="end"/>
+                """ + flow("f1", "start", "agent") + flow("f2", "agent", "end")));
+        assertParseError("an adHocSubProcess cannot contain start or end events", process("p", """
+                <startEvent id="start"/>
+                <adHocSubProcess id="agent">
+                  <documentation>Goal</documentation>
+                  <userTask id="t"/>
+                  <endEvent id="inner"/>
+                </adHocSubProcess>
+                <endEvent id="end"/>
+                """ + flow("f1", "start", "agent") + flow("f2", "agent", "end")));
+        assertParseError("completionCondition is not supported", process("p", """
+                <startEvent id="start"/>
+                <adHocSubProcess id="agent">
+                  <documentation>Goal</documentation>
+                  <userTask id="t"/>
+                  <completionCondition>done</completionCondition>
+                </adHocSubProcess>
+                <endEvent id="end"/>
+                """ + flow("f1", "start", "agent") + flow("f2", "agent", "end")));
+        assertParseError("maxActivations must be a positive whole number", process("p", """
+                <startEvent id="start"/>
+                <adHocSubProcess id="agent">
+                  <documentation>Goal</documentation>
+                  <extensionElements><mintwf:field name="maxActivations" value="0"/></extensionElements>
+                  <userTask id="t"/>
+                </adHocSubProcess>
+                <endEvent id="end"/>
+                """ + flow("f1", "start", "agent") + flow("f2", "agent", "end")));
     }
 
     private void assertParseError(String expected, byte[] xml) {

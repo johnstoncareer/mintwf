@@ -96,7 +96,7 @@
     <li><span class="active"></span>Active</li>
     <li><span class="incident"></span>Incident</li>
     <li><span class="terminated"></span>Terminated</li>
-    <li>Badge: times visited</li>
+    <li>Badge: times visited; inside an agent, #n is the order the agent ran it in</li>
   </ul>
 </header>
 <main>
@@ -327,6 +327,19 @@ async function renderDiagram() {
       names.set(element.id, element.businessObject.name);
     }
   }
+  // Inside an agent (adHocSubProcess) the order matters more than the count: number its nodes in the order they ran.
+  const agentOrder = new Map();
+  const agentSteps = new Map();
+  for (const visit of history) {
+    const element = registry.get(visit.nodeId);
+    const parent = element && element.businessObject.$parent;
+    if (parent && parent.$type === 'bpmn:AdHocSubProcess') {
+      const step = (agentSteps.get(parent.id) || 0) + 1;
+      agentSteps.set(parent.id, step);
+      if (!agentOrder.has(visit.nodeId)) agentOrder.set(visit.nodeId, []);
+      agentOrder.get(visit.nodeId).push(step);
+    }
+  }
   const nodeIds = new Set([...byNode.keys(), ...activeNodes, ...incidentNodes]);
   for (const nodeId of nodeIds) {
     const element = registry.get(nodeId);
@@ -335,10 +348,11 @@ async function renderDiagram() {
     canvas.addMarker(nodeId, 'mintwf-' + state);
     const visits = (byNode.get(nodeId) || []).length;
     if (visits > 0) {
-      overlays.add(nodeId, {
-        position: { top: -10, right: 10 },
-        html: text('div', String(visits), 'mintwf-badge ' + state),
-      });
+      const order = agentOrder.get(nodeId);
+      const badge = text('div', order ? order.map(step => '#' + step).join(' ') : String(visits),
+        'mintwf-badge ' + state);
+      badge.title = order ? 'Run by the agent as step ' + order.join(', ') : 'Visited ' + visits + ' time(s)';
+      overlays.add(nodeId, { position: { top: -10, right: 10 }, html: badge });
     }
   }
   viewer.get('eventBus').on('element.click', event => {

@@ -6,6 +6,7 @@ import com.intwfs.mintwf.core.api.NodeInstance;
 import com.intwfs.mintwf.core.api.NotFoundException;
 import com.intwfs.mintwf.core.api.ProcessExecutionException;
 import com.intwfs.mintwf.core.job.RetryPolicy;
+import com.intwfs.mintwf.core.model.AdHocSubProcess;
 import com.intwfs.mintwf.core.model.CallActivity;
 import com.intwfs.mintwf.core.model.EndEvent;
 import com.intwfs.mintwf.core.model.ExclusiveGateway;
@@ -18,6 +19,8 @@ import com.intwfs.mintwf.core.model.ServiceTask;
 import com.intwfs.mintwf.core.model.StartEvent;
 import com.intwfs.mintwf.core.model.SubProcess;
 import com.intwfs.mintwf.core.model.UserTask;
+import com.intwfs.mintwf.core.spi.AgentContext;
+import com.intwfs.mintwf.core.spi.AgentDecision;
 import com.intwfs.mintwf.core.spi.CallerLink;
 import com.intwfs.mintwf.core.spi.CompiledExpression;
 import com.intwfs.mintwf.core.spi.Execution;
@@ -33,9 +36,11 @@ import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -129,12 +134,136 @@ public final class Interpreter {
     }
 
     /**
-     * Returns whether {@code job}'s token is still waiting on its service task in an active instance. A job that is
-     * not has been overtaken, for example by a concurrent worker, and can be dropped.
+     * Returns whether {@code job}'s token is still waiting on its node in an active instance, and, for an agent turn,
+     * whether nothing the agent started is still running. A job that is not has been overtaken, for example by a
+     * concurrent worker, and can be dropped.
      */
     public boolean isWaiting(InstanceState state, Job job) {
-        return state.status() == InstanceStatus.ACTIVE && state.executions().stream()
+        if (state.status() != InstanceStatus.ACTIVE) {
+            return false;
+        }
+        boolean onNode = state.executions().stream()
                 .anyMatch(e -> e.id().equals(job.executionId()) && e.nodeId().equals(job.nodeId()));
+        return onNode && (job.type() != Job.Type.AGENT_TURN || state.executions().stream()
+                .noneMatch(e -> job.executionId().equals(e.scopeId())));
+    }
+
+    /**
+     * Returns what the agent of an {@link Job.Type#AGENT_TURN} job sees on this turn.
+     *
+     * @param history the instance's node instances, oldest first
+     * @throws ProcessExecutionException if the agent has already started as many activities as it may
+     */
+    public AgentContext agentContext(ExecutableProcess process, InstanceState state, Job job,
+                                     List<NodeInstance> history) {
+        ProcessDefinition definition = process.definition();
+        AdHocSubProcess agent = (AdHocSubProcess) definition.node(job.nodeId());
+        // This run of the agent starts at its scope token's node instance; earlier runs, in a loop, came before.
+        int start = -1;
+        for (int i = 0; i < history.size(); i++) {
+            NodeInstance node = history.get(i);
+            if (node.executionId().equals(job.executionId()) && node.nodeId().equals(agent.id())) {
+                start = i;
+            }
+        }
+        List<AgentContext.Step> steps = history.subList(start + 1, history.size()).stream()
+                .filter(node -> isInside(definition, node.nodeId(), agent.id()))
+                .map(node -> new AgentContext.Step(node.nodeId(), node.nodeType(), node.state(), node.startedAt(),
+                        node.endedAt()))
+                .toList();
+        Set<String> startable = startable(definition, agent);
+        long activations = steps.stream().filter(step -> startable.contains(step.nodeId())).count();
+        if (activations >= agent.maxActivations()) {
+            throw new ProcessExecutionException(describe(agent) + ": the agent has started " + activations
+                    + " activities, its limit (mintwf:field maxActivations)");
+        }
+        List<AgentContext.Activity> activities = startable.stream()
+                .map(definition::node)
+                .map(node -> new AgentContext.Activity(node.id(), node.name(), elementName(node),
+                        definition.documentation(node.id())))
+                .toList();
+        return new AgentContext(state.processKey(), state.id(), state.businessKey(), agent.id(), agent.name(),
+                agent.goal(), agent.fields(), agent.sequential(), activities, state.variables(), steps);
+    }
+
+    /**
+     * Applies an agent planner's decision for an {@link Job.Type#AGENT_TURN} job: starts the activities it chose, or
+     * moves the agent's token on.
+     *
+     * @throws ProcessExecutionException if the turn is no longer due, the decision is invalid, or the instance fails
+     *     while running on
+     */
+    public Result applyAgentDecision(ExecutableProcess process, InstanceState state, List<NodeInstance> active,
+                                     Job job, AgentDecision decision) {
+        if (!isWaiting(state, job)) {
+            throw new ProcessExecutionException("instance '" + state.id() + "' is no longer waiting on job '"
+                    + job.id() + "'");
+        }
+        ProcessDefinition definition = process.definition();
+        AdHocSubProcess agent = (AdHocSubProcess) definition.node(job.nodeId());
+        Run run = new Run(process, state, active);
+        Execution scope = run.executions.get(job.executionId());
+        switch (decision) {
+            case AgentDecision.Complete complete -> {
+                run.variables.putAll(agentVariables(agent, complete.variables()));
+                run.leave(scope, agent);
+            }
+            case AgentDecision.Activate activate -> {
+                if (activate.activations().isEmpty()) {
+                    throw new ProcessExecutionException(describe(agent) + ": the agent planner neither started an "
+                            + "activity nor completed the agent");
+                }
+                if (agent.sequential() && activate.activations().size() > 1) {
+                    throw new ProcessExecutionException(describe(agent) + ": the agent is Sequential but the planner "
+                            + "started " + activate.activations().size() + " activities");
+                }
+                Set<String> startable = startable(definition, agent);
+                for (AgentDecision.Activation activation : activate.activations()) {
+                    if (!startable.contains(activation.activityId())) {
+                        throw new ProcessExecutionException(describe(agent) + ": the agent cannot start '"
+                                + activation.activityId() + "'; it can start " + startable);
+                    }
+                    run.variables.putAll(agentVariables(agent, activation.variables()));
+                }
+                for (AgentDecision.Activation activation : activate.activations()) {
+                    Execution token = new Execution(run.newExecutionId(), activation.activityId(), null, scope.id());
+                    run.executions.put(token.id(), token);
+                    run.queue.add(token);
+                }
+            }
+        }
+        run.drain();
+        return run.finish();
+    }
+
+    /** Returns the activities an agent can start: those directly inside it with no incoming flow. */
+    private static Set<String> startable(ProcessDefinition definition, AdHocSubProcess agent) {
+        Set<String> ids = new LinkedHashSet<>();
+        for (FlowNode node : definition.children(agent.id())) {
+            if (definition.incoming(node.id()).isEmpty()) {
+                ids.add(node.id());
+            }
+        }
+        return ids;
+    }
+
+    private static boolean isInside(ProcessDefinition definition, String nodeId, String containerId) {
+        for (String container = definition.container(nodeId); container != null;
+                container = definition.container(container)) {
+            if (container.equals(containerId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Map<String, Object> agentVariables(AdHocSubProcess agent, Map<String, Object> variables) {
+        try {
+            return Variables.copyOf(variables);
+        } catch (IllegalArgumentException e) {
+            throw new ProcessExecutionException(describe(agent) + ": the agent planner set an invalid variable: "
+                    + e.getMessage(), e);
+        }
     }
 
     /**
@@ -290,9 +419,10 @@ public final class Interpreter {
                     case EndEvent _ -> {
                         exit(token);
                         executions.remove(token.id());
-                        leaveScopeIfDone(token.scopeId());
+                        scopeTokenConsumed(token.scopeId());
                     }
-                    case ServiceTask task when task.async() -> createdJobs.add(newJob(token, task));
+                    case ServiceTask task when task.async() ->
+                            createdJobs.add(newJob(token, task.id(), Job.Type.SERVICE_TASK));
                     case ServiceTask task -> {
                         invoke(task, new HandlerContext(original, task, variables));
                         leave(token, node);
@@ -310,6 +440,9 @@ public final class Interpreter {
                         queue.add(inner);
                     }
                     case CallActivity call -> calls.add(new Call(token.id(), call.id(), call.calledElement()));
+                    case AdHocSubProcess agent ->
+                            // The token waits on the agent as its scope token while the agent takes turns.
+                            createdJobs.add(newJob(token, agent.id(), Job.Type.AGENT_TURN));
                 }
             }
         }
@@ -321,13 +454,21 @@ public final class Interpreter {
             nodeInstances.put(started.id(), started);
         }
 
-        /** Leaves a subprocess once the last token inside it has been consumed. */
-        private void leaveScopeIfDone(String scopeId) {
+        /**
+         * Reacts to a token inside a scope being consumed. Once none is left, a subprocess is left, and an agent takes
+         * its next turn.
+         */
+        private void scopeTokenConsumed(String scopeId) {
             if (scopeId == null || executions.values().stream().anyMatch(e -> scopeId.equals(e.scopeId()))) {
                 return;
             }
             Execution scope = executions.get(scopeId);
-            leave(scope, definition.node(scope.nodeId()));
+            FlowNode node = definition.node(scope.nodeId());
+            if (node instanceof AdHocSubProcess agent) {
+                createdJobs.add(newJob(scope, agent.id(), Job.Type.AGENT_TURN));
+            } else {
+                leave(scope, node);
+            }
         }
 
         /** Completes the token's node instance. Tokens of instances started before node history have none. */
@@ -339,14 +480,22 @@ public final class Interpreter {
             }
         }
 
-        private Job newJob(Execution token, ServiceTask task) {
-            return new Job(UUID.randomUUID().toString(), original.id(), token.id(), task.id(),
-                    Job.Type.SERVICE_TASK, clock.instant(), retryPolicy.attempts(), null, null, null, null,
-                    clock.instant());
+        private Job newJob(Execution token, String nodeId, Job.Type type) {
+            return new Job(UUID.randomUUID().toString(), original.id(), token.id(), nodeId, type, clock.instant(),
+                    retryPolicy.attempts(), null, null, null, null, clock.instant());
         }
 
-        /** Leaves a non-gateway node by every flow whose condition holds, or by the default flow if none does. */
+        /**
+         * Leaves a non-gateway node by every flow whose condition holds, or by the default flow if none does. Inside an
+         * agent, a node without outgoing flows ends its path there.
+         */
         void leave(Execution token, FlowNode node) {
+            if (definition.outgoing(node.id()).isEmpty()) {
+                exit(token);
+                executions.remove(token.id());
+                scopeTokenConsumed(token.scopeId());
+                return;
+            }
             List<SequenceFlow> taken = new ArrayList<>();
             SequenceFlow defaultFlow = null;
             for (SequenceFlow flow : definition.outgoing(node.id())) {

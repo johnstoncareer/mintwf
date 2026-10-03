@@ -25,6 +25,7 @@ public final class ProcessDefinition {
     private final Map<String, List<SequenceFlow>> outgoing = new LinkedHashMap<>();
     private final Map<String, List<SequenceFlow>> incoming = new LinkedHashMap<>();
     private final Map<String, String> containers;
+    private final Map<String, String> documentation;
 
     /**
      * Creates a definition whose nodes are all at the top level of the process.
@@ -43,9 +44,19 @@ public final class ProcessDefinition {
      */
     public ProcessDefinition(String key, String name, List<FlowNode> nodes, List<SequenceFlow> flows,
                              Map<String, String> containers) {
+        this(key, name, nodes, flows, containers, Map.of());
+    }
+
+    /**
+     * @param documentation the text of each node's {@code documentation} element, by node id
+     * @throws IllegalArgumentException as {@link #ProcessDefinition(String, String, List, List, Map)} describes
+     */
+    public ProcessDefinition(String key, String name, List<FlowNode> nodes, List<SequenceFlow> flows,
+                             Map<String, String> containers, Map<String, String> documentation) {
         this.key = key;
         this.name = name;
         this.containers = Map.copyOf(containers);
+        this.documentation = Map.copyOf(documentation);
         for (FlowNode node : nodes) {
             if (this.nodes.putIfAbsent(node.id(), node) != null) {
                 throw new IllegalArgumentException("duplicate node id '" + node.id() + "'");
@@ -122,6 +133,13 @@ public final class ProcessDefinition {
      */
     public String container(String nodeId) {
         return containers.get(nodeId);
+    }
+
+    /**
+     * Returns the text of a node's {@code documentation} element, or {@code null} when it has none.
+     */
+    public String documentation(String nodeId) {
+        return documentation.get(nodeId);
     }
 
     /**

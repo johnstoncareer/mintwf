@@ -4,7 +4,7 @@ import java.time.Instant;
 import java.util.Objects;
 
 /**
- * Asynchronous work for one token, such as calling a service task's handler.
+ * Asynchronous work for one token, such as calling a service task's handler or running an agent's turn.
  *
  * <p>A job with {@code retries > 0} is pending and runs once {@code dueAt} has passed. A job with {@code retries == 0}
  * has failed every attempt and is an incident: it stays until it is retried or its instance is cancelled.
@@ -23,7 +23,9 @@ public record Job(String id, String instanceId, String executionId, String nodeI
 
     public enum Type {
         /** Runs the task handler of a {@code serviceTask}. */
-        SERVICE_TASK
+        SERVICE_TASK,
+        /** Asks the {@link AgentPlanner} what an {@code adHocSubProcess} agent does next. */
+        AGENT_TURN
     }
 
     public Job {

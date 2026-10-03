@@ -28,7 +28,7 @@ This document describes how mintwf is structured and why. It is the reference fo
 | `mintwf-core` | Model, parser, runtime, SPIs, in-memory store | JDK only |
 | `mintwf-store-jdbc` | JDBC `ProcessStore`, schema migrations | H2, Jackson (variable serialization) |
 | `mintwf-handler-http` | The `http` task handler, discovered through `TaskHandlerProvider` | core, Jackson |
-| `mintwf-claude` | The `skill` task handler, discovered through `TaskHandlerProvider` | core, Anthropic Java SDK, Jackson |
+| `mintwf-claude` | The `skill` task handler, discovered through `TaskHandlerProvider`, and the agent planner, discovered as an `AgentPlanner` | core, Anthropic Java SDK, Jackson |
 | `mintwf-cli` | CLI commands and the `worker` subcommand, packaged as a single executable jar | core, store-jdbc, handler-http, claude, picocli, Jackson |
 | `.claude/skills/*` | One `SKILL.md` per process command, each calling the CLI | none |
 
@@ -42,7 +42,7 @@ All modules exist. Packages that later phases fill contain only a `package-info.
 |---|---|---|---|
 | `com.intwfs.mintwf.store.jdbc` | `mintwf-store-jdbc` | `JdbcProcessStore` and schema migrations | 2 (done) |
 | `com.intwfs.mintwf.handler.http` | `mintwf-handler-http` | `http` task handler | 2 (done) |
-| `com.intwfs.mintwf.claude` | `mintwf-claude` | `skill` task handler; one Claude request per task, with adaptive thinking and server-side fallback models ([ADR 0002](adr/0002-subprocesses-call-activities-and-agents.md)) | done |
+| `com.intwfs.mintwf.claude` | `mintwf-claude` | `skill` task handler and `ClaudeAgentPlanner`; one Claude request per task or agent turn, with adaptive thinking and server-side fallback models ([ADR 0002](adr/0002-subprocesses-call-activities-and-agents.md)) | done |
 | `com.intwfs.mintwf.cli` | `mintwf-cli` | `mintwf` entry point, engine configuration, JSON output and error mapping, the instance view page | 3 (done) |
 | `com.intwfs.mintwf.cli.command` | `mintwf-cli` | One command per process command skill | 3 (done) |
 | `com.intwfs.mintwf.cli.worker` | `mintwf-cli` | `mintwf worker`: runs due jobs until stopped | 2 (done) |
@@ -86,6 +86,7 @@ How each node type treats a token:
 - **End event:** consume the token. The instance completes when no tokens remain.
 - **Subprocess:** the token stays on the subprocess as its scope token, and a new token starts at the subprocess's start event. Tokens inside carry the scope token's id as `scopeId`. When the last token inside is consumed, the scope token leaves the subprocess. A parallel gateway only joins tokens of the same scope.
 - **Call activity:** the token waits while an instance of `calledElement` runs. See [Call activities](#call-activities).
+- **Ad-hoc subprocess (agent):** the token stays on it as its scope token, and an `AGENT_TURN` job is created. See [Agents](#agents). Inside an agent, a node without outgoing flows ends its path.
 
 One command visits at most 10,000 nodes, which stops loops that never reach a wait state.
 
@@ -106,6 +107,12 @@ Every visit of a token to a node is recorded as a **node instance** (`NodeInstan
 - A node visited twice, for example in a loop, has two node instances.
 - Each command loads the instance's active node instances with its state and saves the ones it started or ended in the same transaction, so a failed command leaves the history unchanged.
 - Instances started before node history existed have no entries for the nodes they had already left.
+
+### Agents
+
+An `adHocSubProcess` is an agent. When a token enters it, and again whenever no token is left inside it, the interpreter creates an `AGENT_TURN` job for its scope token. A worker runs the job like a service task job: outside any transaction it builds an `AgentContext` (goal, startable activities, variables, and the steps of this run from the node history) and asks the `AgentPlanner` for a decision; then it applies the decision to the latest state in one save. `Activate` starts tokens at the chosen activities inside the scope, after setting the variables the planner gave; `Complete` sets variables and moves the scope token on.
+
+An invalid decision, a planner failure, or reaching `maxActivations` fails the turn, which is retried and then becomes an incident. The engine takes the planner from its builder, else the single one `ServiceLoader` finds. `ClaudeAgentPlanner` sends one request per turn and no earlier model output, so nothing the model wrote is stored. See [ADR 0002](adr/0002-subprocesses-call-activities-and-agents.md).
 
 ### Service tasks
 
@@ -178,7 +185,7 @@ A worker claims a job with `UPDATE mintwf_job SET lock_owner = ?, lock_expiry = 
 | 4. Events | Message and signal catch events, intermediate and boundary timers, boundary error events |
 | 5. Structure | `subProcess` and `callActivity` (done), compensation |
 
-Node history and the `view-instance` page were added outside these phases ([ADR 0001](adr/0001-node-history-and-instance-viewer.md)). The ADR also maps skills, agents, and sub-agents to BPMN for later work.
+Node history, the `view-instance` page, skill tasks, and agents were added outside these phases ([ADR 0001](adr/0001-node-history-and-instance-viewer.md), [ADR 0002](adr/0002-subprocesses-call-activities-and-agents.md)).
 
 Each phase adds its supported elements to the BPMN subset documented in the README.
 
